@@ -1,0 +1,553 @@
+﻿"use client";
+
+import React, { useEffect, useState, useMemo } from "react";
+import type { CSSProperties, FormEvent } from "react";
+import Image from "next/image";
+import type { WeekId, Grade } from "@/lib/persona";
+
+type Role = "user" | "assistant";
+
+type ChatMessage = {
+  id: string;
+  role: Role;
+  content: string;
+  ts: string; // ISO string
+};
+
+const LS_PROFILE_KEY = "ai-tanken:profile:v1";
+const LS_HISTORY_KEY = "ai-tanken:history:v1";
+
+function newId(): string {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function formatTime(iso: string): string {
+  const d = new Date(iso);
+  const h = d.getHours().toString().padStart(2, "0");
+  const m = d.getMinutes().toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+export default function Page() {
+  const [grade, setGrade] = useState<Grade>("小3");
+  const [nickname, setNickname] = useState("");
+  const [interest, setInterest] = useState("");
+  const [week, setWeek] = useState<WeekId>("week1");
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sending, setSending] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  // 初回：localStorage から復元
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined") return;
+      const rawProfile = window.localStorage.getItem(LS_PROFILE_KEY);
+      if (rawProfile) {
+        const p = JSON.parse(rawProfile) as {
+          grade?: Grade;
+          nickname?: string;
+          interest?: string;
+          week?: WeekId;
+        };
+        if (p.grade) setGrade(p.grade);
+        if (typeof p.nickname === "string") setNickname(p.nickname);
+        if (typeof p.interest === "string") setInterest(p.interest);
+        if (p.week) setWeek(p.week);
+      }
+      const rawHistory = window.localStorage.getItem(LS_HISTORY_KEY);
+      if (rawHistory) {
+        const h = JSON.parse(rawHistory) as ChatMessage[];
+        if (Array.isArray(h)) {
+          setMessages(h);
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      setMounted(true);
+    }
+  }, []);
+
+  // プロフィールを保存
+  useEffect(() => {
+    if (!mounted) return;
+    try {
+      const data = { grade, nickname, interest, week };
+      window.localStorage.setItem(LS_PROFILE_KEY, JSON.stringify(data));
+    } catch {
+      // ignore
+    }
+  }, [grade, nickname, interest, week, mounted]);
+
+  // 履歴を保存
+  useEffect(() => {
+    if (!mounted) return;
+    try {
+      window.localStorage.setItem(LS_HISTORY_KEY, JSON.stringify(messages));
+    } catch {
+      // ignore
+    }
+  }, [messages, mounted]);
+
+  // 週変更 or 履歴ゼロのとき、導入メッセージを API から取得
+  useEffect(() => {
+    if (!mounted) return;
+    if (messages.length > 0) return;
+    fetchIntro(week);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [week, mounted]);
+
+  async function fetchIntro(targetWeek: WeekId) {
+    try {
+      setSending(true);
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ week: targetWeek, messages: [] }),
+      });
+      const data = await res.json();
+      const content: string =
+        data.content ??
+        data.reply ??
+        "こんにちは。あい先生だよ。きょうもいっしょにお話ししよう。";
+      const msg: ChatMessage = {
+        id: newId(),
+        role: "assistant",
+        content,
+        ts: new Date().toISOString(),
+      };
+      setMessages([msg]);
+    } catch {
+      const msg: ChatMessage = {
+        id: newId(),
+        role: "assistant",
+        content: "エラーが起きたみたい… もう一度ためしてみてね。",
+        ts: new Date().toISOString(),
+      };
+      setMessages([msg]);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleReset() {
+    if (!window.confirm("この週のトーク履歴を消して、最初の導入にもどします。よいですか？")) {
+      return;
+    }
+    setMessages([]);
+    try {
+      window.localStorage.removeItem(LS_HISTORY_KEY);
+    } catch {
+      // ignore
+    }
+    fetchIntro(week);
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!input.trim() || sending) return;
+    const text = input.trim();
+    setInput("");
+
+    const userMsg: ChatMessage = {
+      id: newId(),
+      role: "user",
+      content: text,
+      ts: new Date().toISOString(),
+    };
+    const history = [...messages, userMsg];
+    setMessages(history);
+
+    try {
+      setSending(true);
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          week,
+          messages: history.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+        }),
+      });
+      const data = await res.json();
+      const replyText: string =
+        data.content ??
+        data.reply ??
+        "ごめんね。うまくお話できなかったみたい。もう一度ためしてみてね。";
+
+      const aiMsg: ChatMessage = {
+        id: newId(),
+        role: "assistant",
+        content: replyText,
+        ts: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, aiMsg]);
+    } catch {
+      const aiMsg: ChatMessage = {
+        id: newId(),
+        role: "assistant",
+        content: "エラーが起きたみたい… もう一度ためしてみてね。",
+        ts: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, aiMsg]);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  const latestAssistantText = useMemo(() => {
+    const last = [...messages].reverse().find((m) => m.role === "assistant");
+    return last?.content ?? "";
+  }, [messages]);
+
+  // ----------- スタイル -----------
+
+  const pageStyle: CSSProperties = {
+    minHeight: "100vh",
+    background: "#f3f5fb",
+    padding: "24px 0",
+    fontFamily:
+      "-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif",
+  };
+
+  const shellStyle: CSSProperties = {
+    maxWidth: 1100,
+    margin: "0 auto",
+    padding: "16px 24px 24px",
+    background: "#ffffff",
+    borderRadius: 16,
+    boxShadow: "0 8px 24px rgba(15, 23, 42, 0.08)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  };
+
+  const headerRow: CSSProperties = {
+    display: "flex",
+    gap: 12,
+    alignItems: "center",
+    fontSize: 14,
+  };
+
+  const labelStyle: CSSProperties = {
+    fontSize: 12,
+    color: "#475569",
+    marginBottom: 4,
+  };
+
+  const selectStyle: CSSProperties = {
+    padding: "6px 10px",
+    borderRadius: 999,
+    border: "1px solid #d4d4dd",
+    fontSize: 13,
+    background: "#f9fafb",
+  };
+
+  const textInputStyle: CSSProperties = {
+    padding: "6px 10px",
+    borderRadius: 999,
+    border: "1px solid #d4d4dd",
+    fontSize: 13,
+    width: 160,
+    background: "#f9fafb",
+  };
+
+  const resetButtonStyle: CSSProperties = {
+    padding: "6px 12px",
+    borderRadius: 999,
+    border: "1px solid #e5e7eb",
+    background: "#f9fafb",
+    fontSize: 12,
+    cursor: "pointer",
+  };
+
+  const mainRow: CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 2.3fr) minmax(0, 1.2fr)",
+    gap: 16,
+    alignItems: "stretch",
+  };
+
+  const leftPanel: CSSProperties = {
+    position: "relative",
+    padding: 24,
+    borderRadius: 16,
+    background: "#f9fafb",
+    boxShadow: "inset 0 0 0 1px rgba(148, 163, 184, 0.3)",
+    overflow: "hidden",
+  };
+
+  const bigBubbleWrapper: CSSProperties = {
+    position: "relative",
+    width: "100%",
+    minHeight: 220,
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "center",
+  };
+
+  const bigBubble: CSSProperties = {
+    width: "100%",
+    maxWidth: 520,
+    minHeight: 180,
+    borderRadius: 32,
+    border: "4px solid #4b5563",
+    boxShadow: "6px 6px 0 rgba(0,0,0,0.15)",
+    padding: 20,
+    fontSize: 15,
+    lineHeight: 1.7,
+    background: "#f9fafb",
+    display: "flex",
+    alignItems: "center",
+  };
+
+  // アイ先生：吹き出しの縦の真ん中付近に、かなり大きく（あなたが調整した値）
+  const teacherImageStyle: CSSProperties = {
+    position: "absolute",
+    left: 190,
+    top: "75%",
+    transform: "translateY(-50%)",
+    width: 200,
+    height: "auto",
+    objectFit: "contain",
+    pointerEvents: "none",
+  };
+
+  const rightPanel: CSSProperties = {
+    borderLeft: "2px solid #d1d5db",
+    paddingLeft: 16,
+    background: "#ffffff",
+    display: "flex",
+    flexDirection: "column",
+    height: "60vh",
+    fontSize: 12,
+  };
+
+  const historyHeader: CSSProperties = {
+    fontSize: 13,
+    fontWeight: 600,
+    marginBottom: 8,
+    color: "#374151",
+  };
+
+  const historyScroll: CSSProperties = {
+    flex: 1,
+    overflowY: "auto",
+    padding: "4px 4px 12px 0",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  };
+
+  const bubbleBase: CSSProperties = {
+    maxWidth: "80%",
+    padding: "8px 10px",
+    borderRadius: 16,
+    fontSize: 13,
+    lineHeight: 1.5,
+    boxShadow: "0 2px 6px rgba(15,23,42,0.08)",
+    wordBreak: "break-word",
+  };
+
+  const teacherBubble: CSSProperties = {
+    ...bubbleBase,
+    alignSelf: "flex-start",
+    background: "#e0f2fe",
+    color: "#0f172a",
+  };
+
+  const userBubble: CSSProperties = {
+    ...bubbleBase,
+    alignSelf: "flex-end",
+    background: "#bbf7d0",
+    color: "#064e3b",
+  };
+
+  const timeStyle: CSSProperties = {
+    fontSize: 10,
+    color: "#6b7280",
+    marginTop: 2,
+    textAlign: "right",
+  };
+
+  const footerStyle: CSSProperties = {
+    marginTop: 12,
+  };
+
+  const inputRow: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  };
+
+  const inputShell: CSSProperties = {
+    flex: 1,
+    borderRadius: 999,
+    border: "2px solid #60a5fa",
+    background: "#f9fbff",
+    display: "flex",
+    alignItems: "center",
+    padding: "6px 12px",
+    gap: 8,
+  };
+
+  const bottomLabel: CSSProperties = {
+    fontSize: 12,
+    color: "#4b5563",
+    whiteSpace: "nowrap",
+  };
+
+  const bottomTextInput: CSSProperties = {
+    flex: 1,
+    border: "none",
+    outline: "none",
+    background: "transparent",
+    fontSize: 14,
+  };
+
+  const sendButton: CSSProperties = {
+    padding: "8px 20px",
+    borderRadius: 999,
+    border: "none",
+    background: sending ? "#9ca3af" : "#3b82f6",
+    color: "#ffffff",
+    fontSize: 13,
+    cursor: sending ? "default" : "pointer",
+  };
+
+  if (!mounted) {
+    return (
+      <div style={pageStyle}>
+        <div style={shellStyle}>
+          <div
+            style={{ width: 160, height: 24, background: "#e5e7eb", borderRadius: 4 }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={pageStyle}>
+      <div style={shellStyle}>
+        {/* ヘッダー */}
+        <div style={headerRow}>
+          <div>
+            <div style={labelStyle}>学年</div>
+            <select
+              value={grade}
+              onChange={(e) => setGrade(e.target.value as Grade)}
+              style={selectStyle}
+            >
+              <option value="小1">小1</option>
+              <option value="小2">小2</option>
+              <option value="小3">小3</option>
+              <option value="小4">小4</option>
+              <option value="小5">小5</option>
+              <option value="小6">小6</option>
+            </select>
+          </div>
+
+          <div>
+            <div style={labelStyle}>ニックネーム</div>
+            <input
+              style={textInputStyle}
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              placeholder="くろたま など"
+            />
+          </div>
+
+          <div>
+            <div style={labelStyle}>興味があること</div>
+            <input
+              style={{ ...textInputStyle, width: 200 }}
+              value={interest}
+              onChange={(e) => setInterest(e.target.value)}
+              placeholder="ゲーム／サッカー など"
+            />
+          </div>
+
+          <div>
+            <div style={labelStyle}>週</div>
+            <select
+              value={week}
+              onChange={(e) => {
+                const w = e.target.value as WeekId;
+                setWeek(w);
+                setMessages([]);
+              }}
+              style={selectStyle}
+            >
+              <option value="week1">Week1：好きなもの</option>
+              <option value="week2">Week2：今日あったこと</option>
+              <option value="week3">Week3：手順</option>
+              <option value="week4">Week4：比べて選ぶ</option>
+              <option value="week5">Week5：観察</option>
+            </select>
+          </div>
+
+          <div style={{ marginLeft: "auto" }}>
+            <button type="button" style={resetButtonStyle} onClick={handleReset}>
+              始めに戻す（履歴クリア）
+            </button>
+          </div>
+        </div>
+
+        {/* メイン 2 ペイン */}
+        <div style={mainRow}>
+          {/* 左：あい先生＋大きな吹き出し */}
+          <div style={leftPanel}>
+            <div style={bigBubbleWrapper}>
+              <div style={bigBubble}>
+                <span>
+                  {latestAssistantText ||
+                    "こんにちは。あい先生だよ。きょうもいっしょにお話ししよう。"}
+                </span>
+              </div>
+            </div>
+            <div style={teacherImageStyle}>
+              <Image src="/ai-sensei.png" alt="あい先生" width={200} height={400} priority />
+            </div>
+          </div>
+
+          {/* 右：トーク履歴（LINE風） */}
+          <div style={rightPanel}>
+            <div style={historyHeader}>トーク履歴</div>
+            <div style={historyScroll}>
+              {messages.map((m) => (
+                <div key={m.id} style={{ display: "flex", flexDirection: "column" }}>
+                  <div style={m.role === "assistant" ? teacherBubble : userBubble}>
+                    {m.content}
+                  </div>
+                  <div style={timeStyle}>{formatTime(m.ts)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* 下：入力エリア（本人入力バーをはっきり） */}
+        <form style={footerStyle} onSubmit={handleSubmit}>
+          <div style={inputRow}>
+            <div style={inputShell}>
+              <span style={bottomLabel}>あなたのこたえ</span>
+              <input
+                style={bottomTextInput}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="メッセージを入力してください"
+              />
+            </div>
+            <button type="submit" style={sendButton} disabled={sending}>
+              送信
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,235 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Grade } from "@/lib/persona";
+
+type Msg = { role: "user" | "assistant"; content: string };
+
+const LS_HISTORY = "ai-tanken:history";
+const LS_PROFILE = "ai-tanken:profile";
+const LS_WEEK = "ai-tanken:week";
+
+const grades: Grade[] = ["小1","小2","小3","小4","小5","小6"];
+
+function introFor(week: "week1" | "week2") {
+  return week === "week2"
+    ? "こんにちは。アイだよ。今日は“相手に伝わる話し方”の練習をしてみよう！まず、最近やってみたことを『きっかけ／やってみたこと／気づき』の3つで教えてくれる？"
+    : "こんにちは。アイだよ。はじめまして！『好きなもの』ってなにかな？どうしてそれが好きなのか、1つ理由も教えてね。";
+}
+
+export default function Page() {
+  // Hydration対策：マウントまで描画しない
+  const [mounted, setMounted] = useState(false);
+
+  // いったん安全なデフォルトで初期化（SSR/CSR一致）
+  const [week, setWeek] = useState<"week1"|"week2">("week1");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [grade, setGrade] = useState<Grade>("小3");
+  const [nickname, setNickname] = useState<string>("");
+  const [interests, setInterests] = useState<string>("");
+
+  const isSending = useRef(false);
+  const [input, setInput] = useState("");
+
+  // マウント時だけ localStorage を読む
+  useEffect(() => {
+    try {
+      const savedWeek = (localStorage.getItem(LS_WEEK) as "week1"|"week2") ?? "week1";
+      setWeek(savedWeek);
+
+      const raw = localStorage.getItem(LS_HISTORY);
+      if (raw) {
+        try { setMessages(JSON.parse(raw) as Msg[]); }
+        catch { setMessages([{ role:"assistant", content:introFor(savedWeek) }]); }
+      } else {
+        setMessages([{ role:"assistant", content:introFor(savedWeek) }]);
+      }
+
+      const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
+      if (p?.grade) setGrade(p.grade as Grade);
+      if (p?.nickname) setNickname(p.nickname as string);
+      if (Array.isArray(p?.interests)) setInterests((p.interests as string[]).join(","));
+    } finally {
+      setMounted(true);
+    }
+  }, []);
+
+  // 永続化（mounted後のみ）
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
+  }, [messages, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const profile = {
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map(s => s.trim()).filter(Boolean)
+        : [],
+    };
+    localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
+  }, [grade, nickname, interests, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_WEEK, week);
+  }, [week, mounted]);
+
+  const profileForApi = useMemo(() => {
+    return {
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map(s => s.trim()).filter(Boolean)
+        : [],
+    };
+  }, [grade, nickname, interests]);
+
+  async function send() {
+    if (!input.trim() || isSending.current) return;
+    isSending.current = true;
+
+    const me: Msg = { role: "user", content: input.trim() };
+    setMessages(prev => [...prev, me]);
+    setInput("");
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messages, me].slice(-16),
+          week,
+          profile: profileForApi,
+        }),
+      });
+      const data = await res.json();
+      const reply: Msg = { role: "assistant", content: data.reply ?? "（返答なし）" };
+      setMessages(prev => [...prev, reply]);
+    } catch (e) {
+      setMessages(prev => [
+        ...prev,
+        { role: "assistant", content: "エラーが起きたみたい。もう一度ためしてみて！" },
+      ]);
+    } finally {
+      isSending.current = false;
+    }
+  }
+
+  function handleWeekChange(newWeek: "week1"|"week2") {
+    setWeek(newWeek);
+    setMessages(prev => {
+      if (prev.length <= 1 && prev[0]?.role === "assistant") {
+        return [{ role: "assistant", content: introFor(newWeek) }];
+      }
+      return prev;
+    });
+  }
+
+  function resetAll() {
+    const w = week;
+    const intro = introFor(w);
+    const init = [{ role: "assistant", content: intro } satisfies Msg];
+    setMessages(init);
+    if (mounted) localStorage.setItem(LS_HISTORY, JSON.stringify(init));
+  }
+
+  if (!mounted) {
+    return (
+      <div className="mx-auto max-w-3xl p-4">
+        <div className="h-8 w-48 bg-gray-100 rounded mb-4" />
+        <div className="h-24 w-full bg-gray-50 rounded border" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl p-4 space-y-4">
+      <div className="flex items-center gap-3">
+        <h1 className="text-2xl font-bold">子ども向けAI学習「アイ」</h1>
+        <span className="text-xs px-2 py-1 rounded bg-blue-100 border border-blue-200">
+          現在の週: {week}
+        </span>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-3 border rounded p-3">
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">学年</span>
+          <select
+            className="border rounded p-1 w-full"
+            value={grade}
+            onChange={(e) => setGrade(e.target.value as any)}
+          >
+            {grades.map(g => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </label>
+
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">ニックネーム</span>
+          <input
+            className="border rounded p-1 w-full"
+            placeholder="たろう など"
+            value={nickname}
+            onChange={(e)=>setNickname(e.target.value)}
+          />
+        </label>
+
+        <label className="flex items-center gap-2 sm:col-span-3">
+          <span className="shrink-0 w-16">興味</span>
+          <input
+            className="border rounded p-1 w-full"
+            placeholder="恐竜, マイクラ, サッカー など"
+            value={interests}
+            onChange={(e)=>setInterests(e.target.value)}
+          />
+        </label>
+
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">週</span>
+          <select
+            className="border rounded p-1 w-full"
+            value={week}
+            onChange={(e)=>handleWeekChange(e.target.value as any)}
+          >
+            <option value="week1">week1: 一緒に考える相手</option>
+            <option value="week2">week2: 伝わる話し方</option>
+          </select>
+        </label>
+
+        <button onClick={resetAll} className="border rounded px-3 py-1">
+          導入に戻す（履歴クリア）
+        </button>
+      </div>
+
+      <div className="border rounded p-3 space-y-3 min-h-[40vh]">
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
+            <div
+              className={
+                "inline-block rounded px-3 py-2 " +
+                (m.role === "user"
+                  ? "bg-gray-200"
+                  : "bg-blue-50")
+              }
+            >
+              {m.content}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          className="border rounded p-2 grow"
+          placeholder="メッセージを入力"
+          value={input}
+          onChange={(e)=>setInput(e.target.value)}
+          onKeyDown={(e)=> { if (e.key === "Enter") send(); }}
+        />
+        <button onClick={send} className="border rounded px-4 py-2">送信</button>
+      </div>
+    </div>
+  );
+}

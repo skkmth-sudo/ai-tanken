@@ -1,0 +1,559 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
+import type { Grade } from "@/lib/persona";
+
+type Msg = {
+  id: string;
+  ts: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
+const LS_HISTORY = "ai-tanken:history";
+const LS_PROFILE = "ai-tanken:profile";
+const LS_WEEK = "ai-tanken:week";
+
+const grades: Grade[] = ["小1", "小2", "小3", "小4", "小5", "小6"];
+
+function introFor(week: "week1" | "week2") {
+  if (week === "week2") {
+    return "こんにちは。あい先生だよ。今日は「相手に伝わる話し方」の練習をしてみよう。最近あった出来事を、友だちに話すみたいに説明してみてね。";
+  }
+  return "こんにちは。あい先生だよ。はじめまして！『好きなもの』って何かな？どうしてそれが好きなのか、1つ理由も教えてね。";
+}
+
+function newId() {
+  return "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function ensureMsgShape(m: any): Msg {
+  return {
+    id: m?.id ?? newId(),
+    ts: m?.ts ?? new Date().toISOString(),
+    role: m?.role === "user" ? "user" : "assistant",
+    content: String(m?.content ?? ""),
+  };
+}
+
+function hhmm(iso: string) {
+  const d = new Date(iso);
+  const h = d.getHours().toString(2,).padStart(2, "0");
+  const m = d.getMinutes().toString(2,).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+export default function Page() {
+  const [mounted, setMounted] = useState(false);
+
+  const [week, setWeek] = useState<"week1" | "week2">("week1");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [grade, setGrade] = useState<Grade>("小3");
+  const [nickname, setNickname] = useState("");
+  const [interests, setInterests] = useState("");
+
+  const [showProfile, setShowProfile] = useState(false);
+
+  const isSending = useRef(false);
+  const [input, setInput] = useState("");
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  // 初回マウント時だけ localStorage 読み込み
+  useEffect(() => {
+    try {
+      const savedWeek = (localStorage.getItem(LS_WEEK) as "week1" | "week2") ?? "week1";
+      setWeek(savedWeek);
+
+      const raw = localStorage.getItem(LS_HISTORY);
+      if (raw) {
+        try {
+          const arr = JSON.parse(raw) as any[];
+          setMessages(arr.map(ensureMsgShape));
+        } catch {
+          setMessages([
+            {
+              id: newId(),
+              ts: new Date().toISOString(),
+              role: "assistant",
+              content: introFor(savedWeek),
+            },
+          ]);
+        }
+      } else {
+        setMessages([
+          {
+            id: newId(),
+            ts: new Date().toISOString(),
+            role: "assistant",
+            content: introFor(savedWeek),
+          },
+        ]);
+      }
+
+      const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
+      if (p?.grade) setGrade(p.grade as Grade);
+      if (p?.nickname) setNickname(p.nickname as string);
+      if (Array.isArray(p?.interests)) {
+        setInterests((p.interests as string[]).join(", "));
+      }
+    } finally {
+      setMounted(true);
+    }
+  }, []);
+
+  // 永続化
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
+  }, [messages, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const profile = {
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map((s) => s.trim()).filter(Boolean)
+        : [],
+    };
+    localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
+  }, [grade, nickname, interests, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_WEEK, week);
+  }, [week, mounted]);
+
+  const profileForApi = useMemo(
+    () => ({
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map((s) => s.trim()).filter(Boolean)
+        : [],
+    }),
+    [grade, nickname, interests]
+  );
+
+  async function send() {
+    if (!input.trim() || isSending.current) return;
+    isSending.current = true;
+
+    const me: Msg = {
+      id: newId(),
+      ts: new Date().toISOString(),
+      role: "user",
+      content: input.trim(),
+    };
+    setMessages((prev) => [...prev, me]);
+    setInput("");
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messages, me].slice(-16).map(({ role, content }) => ({ role, content })),
+          week,
+          profile: profileForApi,
+        }),
+      });
+      const data = await res.json();
+      const reply: Msg = {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: data.reply ?? "（返答がなかったよ）",
+      };
+      setMessages((prev) => [...prev, reply]);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: newId(),
+          ts: new Date().toISOString(),
+          role: "assistant",
+          content: "エラーが起きたみたい。もう一度ためしてみてね。",
+        },
+      ]);
+    } finally {
+      isSending.current = false;
+      queueMicrotask(() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }));
+    }
+  }
+
+  // week 切り替え：導入メッセージを新しく足す（履歴は残す）
+  function handleWeekChange(newWeek: "week1" | "week2") {
+    setWeek(newWeek);
+    const intro = introFor(newWeek);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: intro,
+      },
+    ]);
+  }
+
+  function resetAll() {
+    const w = week;
+    const init: Msg[] = [
+      {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: introFor(w),
+      },
+    ];
+    setMessages(init);
+    if (mounted) localStorage.setItem(LS_HISTORY, JSON.stringify(init));
+  }
+
+  const lastAssistant =
+    [...messages].reverse().find((m) => m.role === "assistant") ??
+    ({
+      id: "intro",
+      ts: new Date().toISOString(),
+      role: "assistant",
+      content: introFor(week),
+    } as Msg);
+
+  if (!mounted) {
+    return (
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: 16 }}>
+        <div style={{ width: 160, height: 24, background: "#eee", borderRadius: 4 }} />
+      </div>
+    );
+  }
+
+  // ---------- スタイル ----------
+
+  const pageStyle: React.CSSProperties = {
+    minHeight: "100vh",
+    background: "#f3f4f6",
+    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+  };
+  const shellStyle: React.CSSProperties = {
+    maxWidth: 960,
+    margin: "0 auto",
+    padding: 16,
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  };
+  const headerRow: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  };
+  const leftHeader: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  };
+  const titleStyle: React.CSSProperties = { fontSize: 24, fontWeight: 700 };
+  const weekBadge: React.CSSProperties = {
+    fontSize: 12,
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#dbeafe",
+    border: "1px solid #bfdbfe",
+  };
+  const profileToggle: React.CSSProperties = {
+    fontSize: 12,
+    padding: "4px 8px",
+    borderRadius: 999,
+    border: "1px solid #d1d5db",
+    background: "#ffffff",
+    cursor: "pointer",
+  };
+
+  const profileGrid: React.CSSProperties = {
+    display: showProfile ? "grid" : "none",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
+    background: "#ffffff",
+    border: "1px solid #e5e7eb",
+    fontSize: 12,
+  };
+  const labelRow: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 4,
+  };
+  const labelText: React.CSSProperties = { flexShrink: 0, width: 64 };
+  const inputStyle: React.CSSProperties = {
+    flex: 1,
+    borderRadius: 4,
+    border: "1px solid #d1d5db",
+    padding: "4px 8px",
+    fontSize: 12,
+  };
+  const selectStyle = inputStyle;
+  const buttonSmall: React.CSSProperties = {
+    borderRadius: 4,
+    border: "1px solid #d1d5db",
+    padding: "4px 8px",
+    fontSize: 12,
+    background: "#ffffff",
+    cursor: "pointer",
+  };
+
+  const mainGrid: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "7fr 3fr", // 左を広め
+    gap: 0,
+    alignItems: "stretch",
+  };
+
+  const leftPanel: React.CSSProperties = {
+    padding: 24,
+    position: "relative",
+    minHeight: "65vh",
+  };
+  const bigBubbleWrapper: React.CSSProperties = {
+    display: "flex",
+    justifyContent: "flex-start",
+    alignItems: "flex-start",
+  };
+  const bigBubble: React.CSSProperties = {
+    width: "100%",
+    maxWidth: 520,
+    minHeight: 180,
+    borderRadius: 32,
+    border: "4px solid #4b5563",
+    boxShadow: "6px 6px 0 rgba(0,0,0,0.15)",
+    padding: 20,
+    fontSize: 15,
+    lineHeight: 1.7,
+    background: "#f9fafb",
+  };
+  // アイ先生：吹き出しの縦の真ん中付近に、かなり大きく
+  const teacherImageStyle: React.CSSProperties = {
+    position: "absolute",
+    left: 190,
+    top: "75%",
+    transform: "translateY(-50%)",
+    width: 200, // 以前の約3倍
+    height: "auto",
+    objectFit: "contain",
+    pointerEvents: "none",
+  };
+
+  const rightPanel: React.CSSProperties = {
+    borderLeft: "2px solid #d1d5db",
+    padding: 16,
+    background: "#ffffff",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: "60vh",
+    fontSize: 12,
+  };
+  const historyHeader: React.CSSProperties = {
+    fontWeight: 600,
+    fontSize: 12,
+    marginBottom: 8,
+  };
+  const historyList: React.CSSProperties = {
+    flex: 1,
+    overflowY: "auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  };
+  const historyBubbleBase: React.CSSProperties = {
+    maxWidth: "85%",
+    padding: "7px 10px",
+    borderRadius: 18,
+    boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
+  };
+  const historyHeaderRow: React.CSSProperties = {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: 10,
+    color: "#6b7280",
+    marginBottom: 2,
+  };
+
+  const footerRow: React.CSSProperties = {
+    marginTop: 8,
+    padding: "10px 14px",
+    borderRadius: 16,
+    background: "#ffffff",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  };
+  const footerLabel: React.CSSProperties = {
+    fontSize: 12,
+    color: "#4b5563",
+    whiteSpace: "nowrap",
+  };
+  const inputFooter: React.CSSProperties = {
+    flex: 1,
+    borderRadius: 999,
+    border: "2px solid #3b82f6",
+    padding: "8px 14px",
+    fontSize: 13,
+    background: "#ffffff",
+  };
+  const sendButton: React.CSSProperties = {
+    borderRadius: 999,
+    border: "none",
+    padding: "8px 16px",
+    fontSize: 13,
+    background: "#3b82f6",
+    color: "#ffffff",
+    cursor: "pointer",
+  };
+
+  return (
+    <div style={pageStyle}>
+      <div style={shellStyle}>
+        {/* ヘッダー */}
+        <div style={headerRow}>
+          <div style={leftHeader}>
+            <div style={titleStyle}>あい先生</div>
+            <span style={weekBadge}>週: {week}</span>
+          </div>
+          <button
+            type="button"
+            style={profileToggle}
+            onClick={() => setShowProfile((v) => !v)}
+          >
+            プロフィール {showProfile ? "▲" : "▼"}
+          </button>
+        </div>
+
+        {/* プロフィール（トグル表示） */}
+        <div style={profileGrid}>
+          <label style={labelRow}>
+            <span style={labelText}>学年</span>
+            <select
+              style={selectStyle}
+              value={grade}
+              onChange={(e) => setGrade(e.target.value as Grade)}
+            >
+              {grades.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label style={labelRow}>
+            <span style={{ ...labelText, width: 80 }}>ニックネーム</span>
+            <input
+              style={inputStyle}
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              placeholder="たろう など"
+            />
+          </label>
+
+          <label style={{ ...labelRow, gridColumn: "span 2" }}>
+            <span style={labelText}>興味</span>
+            <input
+              style={inputStyle}
+              value={interests}
+              onChange={(e) => setInterests(e.target.value)}
+              placeholder="恐竜, マイクラ, サッカー など"
+            />
+          </label>
+
+          <label style={labelRow}>
+            <span style={labelText}>週</span>
+            <select
+              style={selectStyle}
+              value={week}
+              onChange={(e) => handleWeekChange(e.target.value as "week1" | "week2")}
+            >
+              <option value="week1">Week1: 一緒に考える</option>
+              <option value="week2">Week2: 伝える練習</option>
+            </select>
+          </label>
+
+          <button type="button" style={buttonSmall} onClick={resetAll}>
+            始めに戻す（履歴クリア）
+          </button>
+        </div>
+
+        {/* 左右 2 ペイン */}
+        <div style={mainGrid}>
+          {/* 左：大きい吹き出し＋あい先生（真ん中寄せ・大きく） */}
+          <section style={leftPanel}>
+            <div style={bigBubbleWrapper}>
+              <div style={bigBubble}>{lastAssistant.content}</div>
+            </div>
+            <Image
+              src="/ai-sensei.png"
+              alt="あい先生"
+              width={360}
+              height={540}
+              style={teacherImageStyle}
+            />
+          </section>
+
+          {/* 右：LINE風トーク履歴（色をきれいに） */}
+          <aside style={rightPanel}>
+            <div style={historyHeader}>トーク履歴</div>
+            <div style={historyList}>
+              {messages.map((m) => {
+                const isUser = m.role === "user";
+                const bubbleStyle: React.CSSProperties = {
+                  ...historyBubbleBase,
+                  alignSelf: isUser ? "flex-end" : "flex-start",
+                  background: isUser ? "#DCF8C6" : "#E3F2FF", // LINEっぽい色味
+                };
+                return (
+                  <div key={m.id} id={m.id} style={bubbleStyle}>
+                    <div style={historyHeaderRow}>
+                      <span>{isUser ? "あなた" : "あい先生"}</span>
+                      <span>{hhmm(m.ts)}</span>
+                    </div>
+                    <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                      {m.content}
+                    </div>
+                  </div>
+                );
+              })}
+              <div ref={endRef} />
+            </div>
+          </aside>
+        </div>
+
+        {/* 入力欄：場所と色をはっきり */}
+        <div style={footerRow}>
+          <span style={footerLabel}>あなたのこたえ</span>
+          <input
+            style={inputFooter}
+            placeholder="メッセージを入力してください"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") send();
+            }}
+          />
+          <button
+            type="button"
+            style={{
+              ...sendButton,
+              opacity: input.trim() ? 1 : 0.5,
+              pointerEvents: input.trim() ? "auto" : "none",
+            }}
+            onClick={send}
+          >
+            送信
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

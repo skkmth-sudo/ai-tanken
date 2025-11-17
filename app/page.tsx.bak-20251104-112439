@@ -1,0 +1,91 @@
+"use client";
+import { useEffect, useRef, useState } from "react";
+
+type Msg = { role: "user" | "assistant"; content: string };
+
+export default function Home() {
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [],
+          childProfile: {
+            name: "ユウ",
+            call_name: "ユウくん",
+            grade: 3,
+            interests: ["サッカー", "図工"]
+          },
+          longMemory: ["選択肢ヒントがあると考えやすい"]
+        })
+      });
+      const data = await res.json();
+      setMessages([{ role: "assistant", content: data.reply }]);
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  async function send() {
+    if (!input.trim()) return;
+    const next = [...messages, { role: "user" as const, content: input.trim() }];
+    setMessages(next);
+    setInput("");
+    setLoading(true);
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        messages: next,
+        childProfile: {
+          name: "ユウ",
+          call_name: "ユウくん",
+          grade: 3,
+          interests: ["サッカー", "図工"]
+        },
+        longMemory: ["選択肢ヒントがあると考えやすい"]
+      })
+    });
+    const data = await res.json();
+    setMessages([...next, { role: "assistant", content: data.reply }]);
+    setLoading(false);
+  }
+
+  return (
+    <main className="min-h-dvh max-w-xl mx-auto p-4 flex flex-col gap-3">
+      <h1 className="text-xl font-bold">AIたんけん隊（第1週）</h1>
+      <div className="flex-1 border rounded p-3 bg-white overflow-y-auto">
+        {messages.map((m, i) => (
+          <div key={i} className={`mb-3 ${m.role === "user" ? "text-right" : ""}`}>
+            <div className={`inline-block px-3 py-2 rounded ${m.role === "user" ? "bg-blue-100" : "bg-gray-100"}`}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+        {loading && <div className="text-sm text-gray-500">考え中…</div>}
+        <div ref={endRef} />
+      </div>
+      <div className="flex gap-2">
+        <input
+          className="flex-1 border rounded px-3 py-2"
+          placeholder="ここに考えを書いてね"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" ? send() : null}
+        />
+        <button onClick={send} className="px-4 py-2 rounded bg-black text-white">送信</button>
+      </div>
+      <p className="text-xs text-gray-500">
+        ※ 会話はブラウザ上で保持。個別記憶（名前/興味）はAPIに毎回渡しています。
+      </p>
+    </main>
+  );
+}

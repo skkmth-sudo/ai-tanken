@@ -1,0 +1,56 @@
+import { NextRequest, NextResponse } from "next/server";
+import { buildSystemPrompt, week1, ChildProfile } from "@/lib/persona";
+
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+const MODEL = "gpt-4o-mini";
+
+export async function POST(req: NextRequest) {
+  try {
+    const { messages, childProfile, longMemory } = (await req.json()) as {
+      messages: Array<{ role: "user" | "assistant"; content: string }>;
+      childProfile?: ChildProfile;
+      longMemory?: string[];
+    };
+
+    const recent = (messages ?? []).slice(-4);
+    const system = buildSystemPrompt(week1, childProfile, longMemory);
+
+    const body = {
+      model: MODEL,
+      temperature: 0.7,
+      max_tokens: 350,
+      messages: [
+        { role: "system", content: system },
+        ...(recent.length === 0
+          ? [{ role: "assistant" as const, content: week1.start_message }]
+          : []),
+        ...recent,
+        {
+          role: "assistant",
+          content:
+            "出力は短文2〜3文で。具体的にほめる→問いかけ1つ→必要なら2択。言い切らず、次の一歩を促す。"
+        }
+      ]
+    };
+
+    const resp = await fetch(OPENAI_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      return NextResponse.json({ error: err }, { status: 500 });
+    }
+
+    const data = await resp.json();
+    const text = data.choices?.[0]?.message?.content ?? "ごめん、もう一度お願いできる？";
+    return NextResponse.json({ reply: text });
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message ?? "unknown error" }, { status: 500 });
+  }
+}

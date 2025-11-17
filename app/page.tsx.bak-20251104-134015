@@ -1,0 +1,307 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
+import type { Grade } from "@/lib/persona";
+
+type Msg = { id: string; ts: string; role: "user" | "assistant"; content: string };
+
+const LS_HISTORY = "ai-tanken:history";
+const LS_PROFILE = "ai-tanken:profile";
+const LS_WEEK = "ai-tanken:week";
+
+const grades: Grade[] = ["蟆・","蟆・","蟆・","蟆・","蟆・","蟆・"];
+
+function introFor(week: "week1" | "week2") {
+  return week === "week2"
+    ? "縺薙ｓ縺ｫ縺｡縺ｯ縲ゅい繧､縺繧医ゆｻ頑律縺ｯ窶懃嶌謇九↓莨昴ｏ繧玖ｩｱ縺玲婿窶昴・邱ｴ鄙偵ｒ縺励※縺ｿ繧医≧・√∪縺壹∵怙霑代ｄ縺｣縺ｦ縺ｿ縺溘％縺ｨ繧偵弱″縺｣縺九￠・上ｄ縺｣縺ｦ縺ｿ縺溘％縺ｨ・乗ｰ励▼縺阪上・3縺､縺ｧ謨吶∴縺ｦ縺上ｌ繧具ｼ・
+    : "縺薙ｓ縺ｫ縺｡縺ｯ縲ゅい繧､縺繧医ゅ・縺倥ａ縺ｾ縺励※・√主･ｽ縺阪↑繧ゅ・縲上▲縺ｦ縺ｪ縺ｫ縺九↑・溘←縺・＠縺ｦ縺昴ｌ縺悟･ｽ縺阪↑縺ｮ縺九・縺､逅・罰繧よ蕗縺医※縺ｭ縲・;
+}
+
+function newId() {
+  return "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function ensureMsgShape(m: any): Msg {
+  return {
+    id: m?.id ?? newId(),
+    ts: m?.ts ?? new Date().toISOString(),
+    role: m?.role === "user" ? "user" : "assistant",
+    content: String(m?.content ?? ""),
+  };
+}
+function hhmm(iso: string) {
+  const d = new Date(iso);
+  const h = d.getHours().toString().padStart(2,"0");
+  const m = d.getMinutes().toString().padStart(2,"0");
+  return `${h}:${m}`;
+}:;
+}
+
+export default function Page() {
+  const [mounted, setMounted] = useState(false);
+
+  const [week, setWeek] = useState<"week1"|"week2">("week1");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [grade, setGrade] = useState<Grade>("蟆・");
+  const [nickname, setNickname] = useState<string>("");
+  const [interests, setInterests] = useState<string>("");
+
+  const isSending = useRef(false);
+  const [input, setInput] = useState("");
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    try {
+      const savedWeek = (localStorage.getItem(LS_WEEK) as "week1"|"week2") ?? "week1";
+      setWeek(savedWeek);
+
+      const raw = localStorage.getItem(LS_HISTORY);
+      if (raw) {
+        try {
+          const arr = JSON.parse(raw) as any[];
+          setMessages(arr.map(ensureMsgShape));
+        } catch {
+          setMessages([{ id: newId(), ts: new Date().toISOString(), role:"assistant", content:introFor(savedWeek) }]);
+        }
+      } else {
+        setMessages([{ id: newId(), ts: new Date().toISOString(), role:"assistant", content:introFor(savedWeek) }]);
+      }
+
+      const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
+      if (p?.grade) setGrade(p.grade as Grade);
+      if (p?.nickname) setNickname(p.nickname as string);
+      if (Array.isArray(p?.interests)) setInterests((p.interests as string[]).join(","));
+    } finally {
+      setMounted(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
+  }, [messages, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const profile = {
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map(s => s.trim()).filter(Boolean)
+        : [],
+    };
+    localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
+  }, [grade, nickname, interests, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_WEEK, week);
+  }, [week, mounted]);
+
+  const profileForApi = useMemo(() => {
+    return {
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map(s => s.trim()).filter(Boolean)
+        : [],
+    };
+  }, [grade, nickname, interests]);
+
+  async function send() {
+    if (!input.trim() || isSending.current) return;
+    isSending.current = true;
+
+    const me: Msg = { id: newId(), ts: new Date().toISOString(), role: "user", content: input.trim() };
+    setMessages(prev => [...prev, me]);
+    setInput("");
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messages, me].slice(-16).map(({role,content})=>({role,content})),
+          week,
+          profile: profileForApi,
+        }),
+      });
+      const data = await res.json();
+      const reply: Msg = {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: data.reply ?? "・郁ｿ皮ｭ斐↑縺暦ｼ・,
+      };
+      setMessages(prev => [...prev, reply]);
+    } catch (e) {
+      setMessages(prev => [
+        ...prev,
+        { id: newId(), ts: new Date().toISOString(), role: "assistant", content: "繧ｨ繝ｩ繝ｼ縺瑚ｵｷ縺阪◆縺ｿ縺溘＞縲ゅｂ縺・ｸ蠎ｦ縺溘ａ縺励※縺ｿ縺ｦ・・ },
+      ]);
+    } finally {
+      isSending.current = false;
+      queueMicrotask(() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }));
+    }
+  }
+
+  function handleWeekChange(newWeek: "week1"|"week2") {
+    setWeek(newWeek);
+    setMessages(prev => {
+      if (prev.length <= 1 && prev[0]?.role === "assistant") {
+        return [{ id: newId(), ts: new Date().toISOString(), role: "assistant", content: introFor(newWeek) }];
+      }
+      return prev;
+    });
+  }
+
+  function resetAll() {
+    const w = week;
+    const init = [{ id: newId(), ts: new Date().toISOString(), role: "assistant", content: introFor(w) } satisfies Msg];
+    setMessages(init);
+    if (mounted) localStorage.setItem(LS_HISTORY, JSON.stringify(init));
+  }
+
+  if (!mounted) {
+    return (
+      <div className="mx-auto max-w-6xl p-4">
+        <div className="h-8 w-64 bg-gray-100 rounded mb-4" />
+        <div className="h-24 w-full bg-gray-50 rounded border" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-6xl p-4 space-y-4">
+      {/* 繝倥ャ繝 */}
+      <div className="flex items-center gap-3">
+        <h1 className="text-2xl font-bold">蟄舌←繧ょ髄縺羨I蟄ｦ鄙偵後い繧､縲・/h1>
+        <span className="text-xs px-2 py-1 rounded bg-blue-100 border border-blue-200">
+          迴ｾ蝨ｨ縺ｮ騾ｱ: {week}
+        </span>
+      </div>
+
+      {/* 繝励Ο繝輔ぅ繝ｼ繝ｫ險ｭ螳・*/}
+      <div className="grid gap-2 md:grid-cols-4 border rounded p-3 bg-white">
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">蟄ｦ蟷ｴ</span>
+          <select
+            className="border rounded p-1 w-full"
+            value={grade}
+            onChange={(e) => setGrade(e.target.value as any)}
+          >
+            {grades.map(g => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">繝九ャ繧ｯ繝阪・繝</span>
+          <input
+            className="border rounded p-1 w-full"
+            placeholder="縺溘ｍ縺・縺ｪ縺ｩ"
+            value={nickname}
+            onChange={(e)=>setNickname(e.target.value)}
+          />
+        </label>
+        <label className="flex items-center gap-2 md:col-span-2">
+          <span className="shrink-0 w-16">闊亥袖</span>
+          <input
+            className="border rounded p-1 w-full"
+            placeholder="諱千ｫ・ 繝槭う繧ｯ繝ｩ, 繧ｵ繝・き繝ｼ 縺ｪ縺ｩ"
+            value={interests}
+            onChange={(e)=>setInterests(e.target.value)}
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">騾ｱ</span>
+          <select
+            className="border rounded p-1 w-full"
+            value={week}
+            onChange={(e)=>handleWeekChange(e.target.value as any)}
+          >
+            <option value="week1">week1: 荳邱偵↓閠・∴繧狗嶌謇・/option>
+            <option value="week2">week2: 莨昴ｏ繧玖ｩｱ縺玲婿</option>
+          </select>
+        </label>
+        <button onClick={resetAll} className="border rounded px-3 py-1">
+          蟆主・縺ｫ謌ｻ縺呻ｼ亥ｱ･豁ｴ繧ｯ繝ｪ繧｢・・        </button>
+      </div>
+
+      {/* 2蛻・牡: 蟾ｦ=莨夊ｩｱ / 蜿ｳ=LINE鬚ｨ螻･豁ｴ */}
+      <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
+        {/* 蟾ｦ: 莨夊ｩｱ繧ｨ繝ｪ繧｢・医い繧､蜈育函・句ｭ舌←繧ゑｼ・*/}
+        <div className="border rounded p-3 min-h-[60vh] max-h-[70vh] overflow-y-auto bg-white flex flex-col">
+          {messages.map((m) =>
+            m.role === "assistant" ? (
+              <div key={m.id} id={m.id} className="flex items-end gap-2 my-2 max-w-[90%]">
+                <Image
+                  src="/ai-sensei.png"
+                  alt="繧｢繧､蜈育函"
+                  width={40}
+                  height={40}
+                  className="rounded-full border shrink-0 object-cover"
+                />
+                <div className="bg-blue-50 rounded-2xl px-3 py-2 shadow-sm text-sm leading-relaxed">
+                  {m.content}
+                  <div className="text-[10px] text-gray-500 mt-1">{hhmm(m.ts)}</div>
+                </div>
+              </div>
+            ) : (
+              <div key={m.id} id={m.id} className="flex justify-end my-2">
+                <div className="bg-green-50 rounded-2xl px-3 py-2 shadow-sm text-sm leading-relaxed max-w-[90%]">
+                  {m.content}
+                  <div className="text-[10px] text-gray-500 mt-1 text-right">{hhmm(m.ts)}</div>
+                </div>
+              </div>
+            )
+          )}
+          <div ref={endRef} />
+        </div>
+
+        {/* 蜿ｳ: LINE鬚ｨ繝医・繧ｯ螻･豁ｴ・育峡遶九せ繧ｯ繝ｭ繝ｼ繝ｫ・・*/}
+        <aside className="border rounded bg-[#F5F5F7] flex flex-col">
+          <div className="sticky top-0 bg-white border-b px-3 py-2 text-xs font-semibold">
+            繝医・繧ｯ螻･豁ｴ・井ｸ隕ｧ・・          </div>
+          <div className="flex-1 max-h-[70vh] overflow-y-auto p-2 flex flex-col gap-2">
+            {messages.map((m) => (
+              <button
+                key={"side-"+m.id}
+                onClick={() => {
+                  const el = document.getElementById(m.id);
+                  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                }}
+                className={
+                  "max-w-[90%] text-left px-2 py-1 rounded-2xl text-xs shadow-sm " +
+                  (m.role === "user"
+                    ? "self-end bg-white"
+                    : "self-start bg-blue-100")
+                }
+              >
+                <div className="flex items-center justify-between text-[10px] text-gray-500 mb-0.5">
+                  <span>{m.role === "user" ? "縺ゅ↑縺・ : "繧｢繧､蜈育函"}</span>
+                  <span>{hhmm(m.ts)}</span>
+                </div>
+                <div className="whitespace-pre-wrap break-words">
+                  {m.content}
+                </div>
+              </button>
+            ))}
+          </div>
+        </aside>
+      </div>
+
+      {/* 蜈･蜉帶ｬ・*/}
+      <div className="flex gap-2">
+        <input
+          className="border rounded p-2 grow"
+          placeholder="繝｡繝・そ繝ｼ繧ｸ繧貞・蜉・
+          value={input}
+          onChange={(e)=>setInput(e.target.value)}
+          onKeyDown={(e)=> { if (e.key === "Enter") send(); }}
+        />
+        <button onClick={send} className="border rounded px-4 py-2">
+          騾∽ｿ｡
+        </button>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,275 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Grade } from "@/lib/persona";
+
+type Msg = { role: "user" | "assistant"; content: string };
+
+const LS_HISTORY = "ai-tanken:history";
+const LS_PROFILE = "ai-tanken:profile";
+const LS_WEEK = "ai-tanken:week";
+
+const grades: Grade[] = ["蟆・","蟆・","蟆・","蟆・","蟆・","蟆・"];
+
+function introFor(week: "week1" | "week2") {
+  return week === "week2"
+    ? "縺薙ｓ縺ｫ縺｡縺ｯ縲ゅい繧､縺繧医ゆｻ頑律縺ｯ窶懃嶌謇九↓莨昴ｏ繧玖ｩｱ縺玲婿窶昴・邱ｴ鄙偵ｒ縺励※縺ｿ繧医≧・√∪縺壹∵怙霑代ｄ縺｣縺ｦ縺ｿ縺溘％縺ｨ繧偵弱″縺｣縺九￠・上ｄ縺｣縺ｦ縺ｿ縺溘％縺ｨ・乗ｰ励▼縺阪上・3縺､縺ｧ謨吶∴縺ｦ縺上ｌ繧具ｼ・
+    : "縺薙ｓ縺ｫ縺｡縺ｯ縲ゅい繧､縺繧医ゅ・縺倥ａ縺ｾ縺励※・√主･ｽ縺阪↑繧ゅ・縲上▲縺ｦ縺ｪ縺ｫ縺九↑・溘←縺・＠縺ｦ縺昴ｌ縺悟･ｽ縺阪↑縺ｮ縺九・縺､逅・罰繧よ蕗縺医※縺ｭ縲・;
+}
+
+export default function Page() {
+  // 笘・Hydration蟇ｾ遲厄ｼ壹・繧ｦ繝ｳ繝医∪縺ｧ謠冗判縺励↑縺・  const [mounted, setMounted] = useState(false);
+
+  // 縺・▲縺溘ｓ螳牙・縺ｪ繝・ヵ繧ｩ繝ｫ繝医〒蛻晄悄蛹厄ｼ医し繝ｼ繝舌・繝ｻ繧ｯ繝ｩ繧､繧｢繝ｳ繝井ｸ閾ｴ・・  const [week, setWeek] = useState<"week1"|"week2">("week1");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [grade, setGrade] = useState<Grade>("蟆・");
+  const [nickname, setNickname] = useState<string>("");
+  const [interests, setInterests] = useState<string>("");
+
+  const isSending = useRef(false);
+  const [input, setInput] = useState("");
+
+  // 繝槭え繝ｳ繝域凾縺ｫ縺縺・localStorage 繧定ｪｭ繧・医し繝ｼ繝舌・縺ｧ縺ｯ隗ｦ繧峨↑縺・ｼ・  useEffect(() => {
+    try {
+      const savedWeek = (localStorage.getItem(LS_WEEK) as "week1"|"week2") ?? "week1";
+      setWeek(savedWeek);
+
+      const raw = localStorage.getItem(LS_HISTORY);
+      if (raw) {
+        try { setMessages(JSON.parse(raw) as Msg[]); }
+        catch { /* 螢翫ｌ縺ｦ縺溘ｉ蟆主・縺ｧ荳頑嶌縺・*/ setMessages([{ role:"assistant", content:introFor(savedWeek) }]); }
+      } else {
+        setMessages([{ role:"assistant", content:introFor(savedWeek) }]);
+      }
+
+      const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
+      if (p?.grade) setGrade(p.grade as Grade);
+      if (p?.nickname) setNickname(p.nickname as string);
+      if (Array.isArray(p?.interests)) setInterests((p.interests as string[]).join(","));
+    } finally {
+      setMounted(true);
+    }
+  }, []);
+
+  // 豌ｸ邯壼喧・・ounted蠕後・縺ｿ・・  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
+  }, [messages, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const profile = {
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map(s => s.trim()).filter(Boolean)
+        : [],
+    };
+    localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
+  }, [grade, nickname, interests, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_WEEK, week);
+  }, [week, mounted]);
+
+  const profileForApi = useMemo(() => {
+    return {
+      grade,
+      nickname: nickname || undefined,
+      interests: interests
+        ? interests.split(",").map(s => s.trim()).filter(Boolean)
+        : [],
+    };
+  }, [grade, nickname, interests]);
+
+  async function send() {
+    if (!input.trim() || isSending.current) return;
+    isSending.current = true;
+
+    const me: Msg = { role: "user", content: input.trim() };
+    setMessages(prev => [...prev, me]);
+    setInput("");
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messages, me].slice(-16),
+          week,
+          profile: profileForApi,
+        }),
+      });
+      const data = await res.json();
+      const reply: Msg = { role: "assistant", content: data.reply ?? "・郁ｿ皮ｭ斐↑縺暦ｼ・ };
+      setMessages(prev => [...prev, reply]);
+    } catch (e) {
+      setMessages(prev => [
+        ...prev,
+        { role: "assistant", content: "繧ｨ繝ｩ繝ｼ縺瑚ｵｷ縺阪◆縺ｿ縺溘＞縲ゅｂ縺・ｸ蠎ｦ縺溘ａ縺励※縺ｿ縺ｦ・・ },
+      ]);
+    } finally {
+      isSending.current = false;
+    }
+  }
+
+  function handleWeekChange(newWeek: "week1"|"week2") {
+    setWeek(newWeek);
+    setMessages(prev => {
+      if (prev.length <= 1 && prev[0]?.role === "assistant") {
+        return [{ role: "assistant", content: introFor(newWeek) }];
+      }
+      return prev;
+    });
+  }
+
+  function resetAll() {
+    const w = week;
+    const intro = introFor(w);
+    const init = [{ role: "assistant", content: intro } satisfies Msg];
+    setMessages(init);
+    if (mounted) localStorage.setItem(LS_HISTORY, JSON.stringify(init));
+  }
+
+  // 繧ｵ繝ｼ繝舌・縺ｨ繧ｯ繝ｩ繧､繧｢繝ｳ繝医〒螳悟・荳閾ｴ縺輔○繧九◆繧√［ounted蜑阪・繝励Ξ繝ｼ繧ｹ繝帙Ν繝繝ｼ縺ｮ縺ｿ
+  if (!mounted) {
+    return (
+      <div className="mx-auto max-w-3xl p-4">
+        <div className="h-8 w-48 bg-gray-100 rounded mb-4" />
+        <div className="h-24 w-full bg-gray-50 rounded border" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl p-4 space-y-4">
+      <div className="flex items-center gap-3">
+        <h1 className="text-2xl font-bold">蟄舌←繧ょ髄縺羨I蟄ｦ鄙偵後い繧､縲・/h1>
+        <span className="text-xs px-2 py-1 rounded bg-blue-100 border border-blue-200">
+          迴ｾ蝨ｨ縺ｮ騾ｱ: {week}
+        </span>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-3 border rounded p-3">
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">蟄ｦ蟷ｴ</span>
+          <select
+            className="border rounded p-1 w-full"
+            value={grade}
+            onChange={(e) => setGrade(e.target.value as any)}
+          >
+            {grades.map(g => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </label>
+
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">繝九ャ繧ｯ繝阪・繝</span>
+          <input
+            className="border rounded p-1 w-full"
+            placeholder="縺溘ｍ縺・縺ｪ縺ｩ"
+            value={nickname}
+            onChange={(e)=>setNickname(e.target.value)}
+          />
+        </label>
+
+        <label className="flex items-center gap-2 sm:col-span-3">
+          <span className="shrink-0 w-16">闊亥袖</span>
+          <input
+            className="border rounded p-1 w-full"
+            placeholder="諱千ｫ・ 繝槭う繧ｯ繝ｩ, 繧ｵ繝・き繝ｼ 縺ｪ縺ｩ"
+            value={interests}
+            onChange={(e)=>setInterests(e.target.value)}
+          />
+        </label>
+
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 w-16">騾ｱ</span>
+          <select
+            className="border rounded p-1 w-full"
+            value={week}
+            onChange={(e)=>handleWeekChange(e.target.value as any)}
+          >
+            <option value="week1">week1: 荳邱偵↓閠・∴繧狗嶌謇・/option>
+            <option value="week2">week2: 莨昴ｏ繧玖ｩｱ縺玲婿</option>
+          </select>
+        </label>
+
+        <button onClick={resetAll} className="border rounded px-3 py-1">
+          蟆主・縺ｫ謌ｻ縺呻ｼ亥ｱ･豁ｴ繧ｯ繝ｪ繧｢・・        </button>
+      </div>
+
+      <div className="border rounded p-3 space-y-3 min-h-[40vh]">
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
+            <div
+              className={
+                "inline-block rounded px-3 py-2 " +
+                (m.role === "user"
+                  ? "bg-gray-200"
+                  : "bg-blue-50")
+              }
+            >
+              {m.content}
+            </div>
+          </div>
+        ))}
+      </div>
+      {/* 便利ツール: 履歴の保存/読み込み */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={()=>{
+            try{
+              const blob = new Blob([localStorage.getItem("ai-tanken:history") ?? "[]"], {type:"application/json"})
+              const a = document.createElement("a")
+              a.href = URL.createObjectURL(blob)
+              a.download = `aitanken-history-${new Date().toISOString().slice(0,10)}.json`
+              a.click()
+              URL.revokeObjectURL(a.href)
+            }catch(e){ alert("保存に失敗しました") }
+          }}
+          className="border rounded px-3 py-1"
+          title="現在の会話履歴をJSONで保存"
+        >
+          履歴を保存(JSON)
+        </button>
+
+        <label className="border rounded px-3 py-1 cursor-pointer" title="JSONから履歴を読み込み">
+          履歴を読み込み
+          <input
+            type="file"
+            accept="application/json"
+            className="hidden"
+            onChange={async (e)=>{
+              const f = e.target.files?.[0]; if(!f) return;
+              try{
+                const text = await f.text();
+                const arr = JSON.parse(text);
+                if (Array.isArray(arr)) {
+                  localStorage.setItem("ai-tanken:history", JSON.stringify(arr));
+                  // 最短で画面反映
+                  location.reload();
+                } else {
+                  alert("JSON形式が不正です（配列ではありません）");
+                }
+              }catch(_e){ alert("読み込みに失敗しました"); }
+              e.currentTarget.value = "";
+            }}
+          />
+        </label>
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          className="border rounded p-2 grow"
+          placeholder="繝｡繝・そ繝ｼ繧ｸ繧貞・蜉・
+          value={input}
+          onChange={(e)=>setInput(e.target.value)}
+          onKeyDown={(e)=> { if (e.key === "Enter") send(); }}
+        />
+        <button onClick={send} className="border rounded px-4 py-2">騾∽ｿ｡</button>
+      </div>
+    </div>
+  );
+}
+
