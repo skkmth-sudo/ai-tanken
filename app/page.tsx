@@ -264,8 +264,8 @@ export default function Page() {
     borderRadius: 999,
     background: "#dbeafe",
     border: "1px solid #bfdbfe",
-     marginLeft: 12,          // ← これでタイトルの右に余白を作る
-  whiteSpace: "nowrap",    // ← 折り返し防止（高さが増えないように）
+    marginLeft: 12, // ← これでタイトルの右に余白を作る
+    whiteSpace: "nowrap", // ← 折り返し防止（高さが増えないように）
   };
   const profileToggle: CSSProperties = {
     fontSize: 12,
@@ -283,7 +283,7 @@ export default function Page() {
     padding: 12,
     borderRadius: 12,
     background: "#ffffff",
-    border: "1px solid #e5e7eb",
+   border: "1px solid #e5e7eb", 
     fontSize: 12,
   };
   const labelRow: CSSProperties = {
@@ -311,7 +311,7 @@ export default function Page() {
   const leftPanel: CSSProperties = {
     padding: 24,
     position: "relative",
-    minHeight: "65vh",
+    height: "65vh", // ★ 固定高さ
     backgroundImage: 'url("/classpicture.png")',
     backgroundSize: "cover",
     backgroundPosition: "center",
@@ -355,7 +355,8 @@ export default function Page() {
     background: "#ffffff",
     display: "flex",
     flexDirection: "column",
-    minHeight: "60vh",
+    height: "65vh",      // ★ 左と同じ高さで固定
+    overflow: "hidden",  // ★ 外側にはスクロールさせない
     fontSize: 12,
   };
   const historyHeader: CSSProperties = {
@@ -365,7 +366,7 @@ export default function Page() {
   };
   const historyList: CSSProperties = {
     flex: 1,
-    overflowY: "auto",
+    overflowY: "auto", // ★ 中だけスクロール
     display: "flex",
     flexDirection: "column",
     gap: 8,
@@ -433,8 +434,6 @@ export default function Page() {
             <div style={titleStyle}>あい先生</div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-
-            {/* ← 週バッジを右側へ移動 */}
             <span style={weekBadge}>週: {week}</span>
             <button
               type="button"
@@ -478,7 +477,7 @@ export default function Page() {
             </select>
           </label>
 
-         <label style={{ ...labelRow, gridColumn: "3 / span 1" }}>
+          <label style={{ ...labelRow, gridColumn: "3 / span 1" }}>
             <span style={{ ...labelText, width: 80 }}>ニックネーム</span>
             <input
               style={inputStyle}
@@ -488,8 +487,7 @@ export default function Page() {
             />
           </label>
 
-         <label style={{ ...labelRow, gridColumn: "6 / span 1" }}>
-
+          <label style={{ ...labelRow, gridColumn: "6 / span 1" }}>
             <span style={labelText}>週</span>
             <select
               style={selectStyle}
@@ -522,7 +520,7 @@ export default function Page() {
           </section>
 
           {/* 右：LINE風トーク履歴 */}
-        <aside style={rightPanel}>
+          <aside style={rightPanel}>
             <div style={historyHeader}>おはなしのきろく</div>
             <div style={historyList}>
               {messages.map((m) => {
