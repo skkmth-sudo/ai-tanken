@@ -654,8 +654,8 @@
           <p>あい先生といっしょに、「好きなもの」「今日あったこと」「友だちとの出来事」から、すこしずつ、ことばの世界をひろげていきませんか？</p>
         </div>
 
-        <!-- ★ ここが申し込みフォーム本体 -->
-        <form class="entry-form" action="#" method="post">
+               <!-- ★ ここが申し込みフォーム本体 -->
+        <form id="entry-form-inner" class="entry-form">
           <div class="form-row">
             <label for="parentName">保護者さまのお名前<span class="required">*</span></label>
             <input id="parentName" name="parentName" type="text" placeholder="例）黒玉　太郎" required />
@@ -736,6 +736,7 @@
   </footer>
 
   <script>
+    // 年表示
     document.getElementById("year").textContent = new Date().getFullYear();
 
     // ライトボックス処理
@@ -752,6 +753,7 @@
         backdrop.classList.add("is-open");
         backdrop.setAttribute("aria-hidden", "false");
       }
+
       function closeLightbox() {
         backdrop.classList.remove("is-open");
         backdrop.setAttribute("aria-hidden", "true");
@@ -768,13 +770,67 @@
       backdrop.addEventListener("click", function (e) {
         if (e.target === backdrop) closeLightbox();
       });
+
       if (closeBtn) {
         closeBtn.addEventListener("click", function () {
           closeLightbox();
         });
       }
+
       document.addEventListener("keydown", function (e) {
         if (e.key === "Escape") closeLightbox();
+      });
+    })();
+
+    // ★ 申込フォーム → メールアプリ起動（mailto）処理
+    (function () {
+      const form = document.getElementById("entry-form-inner");
+      if (!form) return;
+
+      form.addEventListener("submit", function (e) {
+        e.preventDefault(); // ページ遷移を止める
+
+        // ★ここを自分のメールアドレスに変える★
+        const to = "tao.tao.taopi26@gmail.com";
+
+        const parentName    = form.parentName.value.trim();
+        const childNickname = form.childNickname.value.trim();
+        const grade         = form.grade.value;
+        const startMonth    = form.startMonth.value;
+        const email         = form.email.value.trim();
+        const contact       = form.contact.value;
+        const message       = form.message.value.trim();
+
+        const subject = "【あい先生】体験レッスンのお申し込み";
+
+        const bodyLines = [
+          "以下の内容でお申し込みがありました。",
+          "",
+          `保護者さまのお名前: ${parentName}`,
+          `お子さまのニックネーム: ${childNickname}`,
+          `学年: ${grade}`,
+          `はじめたい時期: ${startMonth || "（未選択）"}`,
+          `ご連絡先メールアドレス: ${email}`,
+          `連絡方法のご希望: ${contact || "特に希望なし"}`,
+          "",
+          "ご質問や事前に伝えておきたいこと:",
+          message || "（特になし）",
+          "",
+          "―――",
+          "このメールはあい先生LPのフォームから送信されました。"
+        ];
+
+        // 日本語部分はそのまま、改行だけURL用に変換
+        const bodyRaw   = bodyLines.join("\n");
+        const bodyForUrl = bodyRaw.replace(/\n/g, "%0D%0A");
+
+        const mailtoUrl =
+          `mailto:${to}` +
+          `?subject=${encodeURIComponent(subject)}` +
+          `&body=${bodyForUrl}`;
+
+        // ユーザーのメールアプリを起動
+        window.location.href = mailtoUrl;
       });
     })();
   </script>
