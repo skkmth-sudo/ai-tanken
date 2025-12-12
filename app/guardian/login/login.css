@@ -1,0 +1,95 @@
+.login-wrapper {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background: url("/cafe-bg.jpg") center/cover no-repeat;
+  backdrop-filter: blur(2px);
+}
+
+.login-card {
+  background: rgba(255, 255, 255, 0.88);
+  padding: 40px 44px;
+  width: 340px;
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgba(40, 28, 20, 0.12);
+  text-align: center;
+  font-family: "Hiragino Sans", "Yu Gothic", sans-serif;
+}
+
+.login-title-ja {
+  font-size: 20px;
+  letter-spacing: 1px;
+  color: #4d372f;
+  font-weight: 600;
+}
+
+.login-sub {
+  font-size: 13px;
+  color: #b69a8d;
+  margin-top: 2px;
+  margin-bottom: 14px;
+}
+
+.login-caption {
+  font-size: 11px;
+  color: #8c7a70;
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: left;
+}
+
+.login-form label {
+  font-size: 12px;
+  color: #6a564f;
+}
+
+.login-form input {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #d9ccc5;
+  background: #faf7f4;
+  outline: none;
+  font-size: 13px;
+}
+
+.login-form input:focus {
+  border-color: #c9a48b;
+  box-shadow: 0 0 0 3px rgba(201, 164, 139, 0.2);
+}
+
+.login-btn {
+  background: #c7a28f;
+  border: none;
+  color: white;
+  padding: 10px 0;
+  border-radius: 10px;
+  margin-top: 6px;
+  font-size: 14px;
+  transition: opacity 0.2s ease;
+  cursor: pointer;
+}
+
+.login-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.login-error {
+  color: #b8553c;
+  font-size: 12px;
+  text-align: center;
+}
+
+.login-note {
+  font-size: 10px;
+  color: #8c7a70;
+  margin-top: 18px;
+  line-height: 1.6;
+}

@@ -14,6 +14,7 @@ type Msg = {
 const LS_HISTORY = "ai-tanken:history";
 const LS_PROFILE = "ai-tanken:profile";
 const LS_WEEK = "ai-tanken:week";
+const LS_CHILD_ID = "ai-tanken:childId";
 
 const grades: Grade[] = ["小1", "小2", "小3", "小4", "小5", "小6"];
 
@@ -44,6 +45,9 @@ export default function Page() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [grade, setGrade] = useState<Grade>("小3");
   const [nickname, setNickname] = useState("");
+
+  // ★ Supabase children.id（UUID）を入れる（localStorageに保存）
+  const [childId, setChildId] = useState("");
 
   const [showProfile, setShowProfile] = useState(false);
 
@@ -89,17 +93,22 @@ export default function Page() {
       const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
       if (p?.grade) setGrade(p.grade as Grade);
       if (p?.nickname) setNickname(p.nickname as string);
+
+      // ★ childId
+      const savedChildId = localStorage.getItem(LS_CHILD_ID) ?? "";
+      setChildId(savedChildId);
     } finally {
       setMounted(true);
     }
   }, []);
 
-  // 永続化
+  // 永続化（履歴）
   useEffect(() => {
     if (!mounted) return;
     localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
   }, [messages, mounted]);
 
+  // 永続化（プロフィール）
   useEffect(() => {
     if (!mounted) return;
     const profile = {
@@ -109,10 +118,17 @@ export default function Page() {
     localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
   }, [grade, nickname, mounted]);
 
+  // 永続化（週）
   useEffect(() => {
     if (!mounted) return;
     localStorage.setItem(LS_WEEK, week);
   }, [week, mounted]);
+
+  // 永続化（childId）
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_CHILD_ID, childId);
+  }, [childId, mounted]);
 
   const profileForApi = useMemo(
     () => ({
@@ -170,6 +186,36 @@ export default function Page() {
       queueMicrotask(() =>
         endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
       );
+    }
+  }
+
+  // ★ 会話終了（保存）
+  async function endConversation() {
+    if (!childId.trim()) {
+      alert("child_id が空です。プロフィールを開いて child_id（children.id）を入れてください。");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/save-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childId: childId.trim(),
+          messages: messages.map(({ role, content }) => ({ role, content })),
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!data.ok) {
+        alert("保存に失敗: " + (data.error ?? "unknown"));
+        return;
+      }
+
+      alert("会話ログを保存しました！（guardian 側に反映されます）");
+    } catch (e: any) {
+      alert("保存中にエラー: " + (e?.message ?? "unknown"));
     }
   }
 
@@ -264,8 +310,8 @@ export default function Page() {
     borderRadius: 999,
     background: "#dbeafe",
     border: "1px solid #bfdbfe",
-    marginLeft: 12, // ← これでタイトルの右に余白を作る
-    whiteSpace: "nowrap", // ← 折り返し防止（高さが増えないように）
+    marginLeft: 12,
+    whiteSpace: "nowrap",
   };
   const profileToggle: CSSProperties = {
     fontSize: 12,
@@ -283,7 +329,7 @@ export default function Page() {
     padding: 12,
     borderRadius: 12,
     background: "#ffffff",
-   border: "1px solid #e5e7eb", 
+    border: "1px solid #e5e7eb",
     fontSize: 12,
   };
   const labelRow: CSSProperties = {
@@ -311,7 +357,7 @@ export default function Page() {
   const leftPanel: CSSProperties = {
     padding: 24,
     position: "relative",
-    height: "65vh", // ★ 固定高さ
+    height: "65vh",
     backgroundImage: 'url("/classpicture.png")',
     backgroundSize: "cover",
     backgroundPosition: "center",
@@ -355,8 +401,8 @@ export default function Page() {
     background: "#ffffff",
     display: "flex",
     flexDirection: "column",
-    height: "65vh",      // ★ 左と同じ高さで固定
-    overflow: "hidden",  // ★ 外側にはスクロールさせない
+    height: "65vh",
+    overflow: "hidden",
     fontSize: 12,
   };
   const historyHeader: CSSProperties = {
@@ -366,7 +412,7 @@ export default function Page() {
   };
   const historyList: CSSProperties = {
     flex: 1,
-    overflowY: "auto", // ★ 中だけスクロール
+    overflowY: "auto",
     display: "flex",
     flexDirection: "column",
     gap: 8,
@@ -420,9 +466,7 @@ export default function Page() {
 
   const weekOptions = Object.entries(weeks).map(([id, cfg]) => ({
     id: id as WeekId,
-    label: `Week${id.replace("week", "")}: ${
-      cfg.title.split("→")[0]?.trim() ?? cfg.title
-    }`,
+    label: `Week${id.replace("week", "")}: ${cfg.title.split("→")[0]?.trim() ?? cfg.title}`,
   }));
 
   return (
@@ -435,6 +479,7 @@ export default function Page() {
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span style={weekBadge}>週: {week}</span>
+
             <button
               type="button"
               style={profileToggle}
@@ -442,6 +487,23 @@ export default function Page() {
             >
               プロフィール {showProfile ? "▲" : "▼"}
             </button>
+
+            {/* ★ 会話終了（保存） */}
+            <button
+              type="button"
+              style={{
+                fontSize: 12,
+                padding: "4px 10px",
+                borderRadius: 999,
+                border: "1px solid #d1d5db",
+                background: "#ffffff",
+                cursor: "pointer",
+              }}
+              onClick={endConversation}
+            >
+              会話終了（保存）
+            </button>
+
             <button
               type="button"
               style={{
@@ -484,6 +546,17 @@ export default function Page() {
               value={nickname}
               onChange={(e) => setNickname(e.target.value)}
               placeholder="たろう など"
+            />
+          </label>
+
+          {/* ★ child_id 入力 */}
+          <label style={{ ...labelRow, gridColumn: "3 / span 2" }}>
+            <span style={{ ...labelText, width: 80 }}>child_id</span>
+            <input
+              style={inputStyle}
+              value={childId}
+              onChange={(e) => setChildId(e.target.value)}
+              placeholder="Supabaseの children.id（UUID）"
             />
           </label>
 
@@ -536,12 +609,7 @@ export default function Page() {
                       <span>{isUser ? "あなた" : "あい先生"}</span>
                       <span>{hhmm(m.ts)}</span>
                     </div>
-                    <div
-                      style={{
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
-                    >
+                    <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                       {m.content}
                     </div>
                   </div>

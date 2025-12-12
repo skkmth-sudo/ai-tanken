@@ -2,9 +2,9 @@
 import { NextResponse } from "next/server";
 import { getWeekConfig, WeekId } from "@/lib/persona";
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// 重要：ビルド時に落ちないように dynamic / nodejs を明示
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type SimpleMsg = {
   role: "user" | "assistant";
@@ -26,14 +26,18 @@ export async function POST(req: Request) {
     const body = (await req.json()) as Body;
     const { messages, week, profile } = body;
 
-    // APIキーがないときは子ども向けのメッセージだけ返す
-    if (!process.env.OPENAI_API_KEY) {
+    // ✅ APIキーがないときは “ここで” 返す（＝new OpenAI しない）
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
       return NextResponse.json({
         ok: false,
         reply:
-          "ごめんね。じゅんびのカギ（OPENAI_API_KEY）がまだ入っていないみたい。大人の人に『.env.local に OPENAI_API_KEY を入れてね』と伝えてもらえるかな？",
+          "ごめんね。じゅんびのカギ（OPENAI_API_KEY）がまだ入っていないみたい。大人の人に『Vercel の Environment Variables に OPENAI_API_KEY を入れてね』と伝えてもらえるかな？",
       });
     }
+
+    // ✅ ここで初めて作る（＝ビルド時に例外が出ない）
+    const client = new OpenAI({ apiKey });
 
     const cfg = getWeekConfig(week);
 
@@ -46,13 +50,10 @@ export async function POST(req: Request) {
 
     const systemText =
       cfg.systemPrompt +
-      (profileLines.length
-        ? `\n\n【こどもの情報】\n${profileLines.join("\n")}`
-        : "");
+      (profileLines.length ? `\n\n【こどもの情報】\n${profileLines.join("\n")}` : "");
 
     const openaiMessages = [
       { role: "system" as const, content: systemText },
-      // 念のため、最初の導入文もコンテキストに入れておく
       { role: "assistant" as const, content: cfg.openingMessage },
       ...messages.map((m) => ({
         role: m.role === "user" ? ("user" as const) : ("assistant" as const),
