@@ -1,557 +1,722 @@
+
+
 "use client";
 
-import React, { useState, useEffect } from "react";
-import "./guardian.css";
-import { supabase } from "@/lib/supabaseClient";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import Image from "next/image";
+import { weeks, type Grade, type WeekId } from "@/lib/persona";
 
-type ChatMessage = {
+type Msg = {
+  id: string;
+  ts: string;
   role: "user" | "assistant";
-  text: string;
+  content: string;
 };
 
-type ChatSession = {
-  id: string;
-  startedAt: string;
-  messages: ChatMessage[];
-};
+const LS_HISTORY = "ai-tanken:history";
+const LS_PROFILE = "ai-tanken:profile";
+const LS_WEEK = "ai-tanken:week";
+// ★ childId は「保存はする」が「手入力はさせない」
+const LS_CHILD_ID = "ai-tanken:childId";
 
-type Child = {
-  id: string;
-  name: string;
-  grade: string;
-  avatarLabel: string;
-  favorites: string[];
-  strength: string;
-  thisWeek: {
-    theme: string;
-    conversationCount: number;
-    highlight: string;
+const grades: Grade[] = ["小1", "小2", "小3", "小4", "小5", "小6"];
+
+function newId() {
+  return "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function ensureMsgShape(m: any): Msg {
+  return {
+    id: m?.id ?? newId(),
+    ts: m?.ts ?? new Date().toISOString(),
+    role: m?.role === "user" ? "user" : "assistant",
+    content: String(m?.content ?? ""),
   };
-  freeTrialDaysLeft: number;
-  growthPoints: string[];
-  nextReportLabel: string;
-  recentSessions: ChatSession[];
-};
+}
 
-type ParentData = {
-  name: string;
-  greetingTime: string;
-  children: Child[];
-};
+function hhmm(iso: string) {
+  const d = new Date(iso);
+  const h = d.getHours().toString().padStart(2, "0");
+  const m = d.getMinutes().toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
 
-// 🔸 フォールバック（ログインしてない or DB空のとき用）
-const fallbackParent: ParentData = {
-  name: "さとう",
-  greetingTime: "こんにちは",
-  children: [
-    {
-      id: "haru",
-      name: "はるかちゃん",
-      grade: "小学3年生",
-      avatarLabel: "haru",
-      favorites: ["ねこ", "りんご", "おえかき"],
-      strength: "ことばで気持ちを伝えること",
-      thisWeek: {
-        theme: "好きなものの理由をことばにしてみよう",
-        conversationCount: 3,
-        highlight: "「だから〜」が上手に使えていました。",
-      },
-      freeTrialDaysLeft: 7,
-      growthPoints: [
-        "理由を2文以上で説明できる場面が増えてきました。",
-        "「〜だから」「〜なので」を自然に使えていました。",
-        "自分から「たとえばね」と、例を出すことができました。",
-      ],
-      nextReportLabel: "次回：2025年3月ごろ",
-      recentSessions: [
-        {
-          id: "session-haru-1",
-          startedAt: "2025-02-10 18:30",
-          messages: [
-            {
-              role: "assistant",
-              text: "はるかちゃん、こんにちは。今日もお話ししてくれてありがとう。",
-            },
-            {
-              role: "user",
-              text: "きょうね、ねことあそんだよ。",
-            },
-            {
-              role: "assistant",
-              text: "そうなんだ、ねことどんなふうにあそんだの？",
-            },
-            {
-              role: "user",
-              text: "ボールなげて、おいかけてた。かわいいから、ずっと見てた！",
-            },
-            {
-              role: "assistant",
-              text: "「かわいいから、ずっと見てた」って言えるの、とってもいいね。",
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: "yuto",
-      name: "ゆうとくん",
-      grade: "小学1年生",
-      avatarLabel: "yuto",
-      favorites: ["レゴ", "電車", "カレー"],
-      strength: "あたらしいことに挑戦すること",
-      thisWeek: {
-        theme: "はじめての自己紹介にチャレンジ",
-        conversationCount: 2,
-        highlight: "自分から『ぼくの好きなものはね』と話し始められました。",
-      },
-      freeTrialDaysLeft: 7,
-      growthPoints: [
-        "短い文章での自己紹介ができるようになってきました。",
-        "相手の質問を聞いてから答える流れが身についてきました。",
-      ],
-      nextReportLabel: "次回：2025年4月ごろ",
-      recentSessions: [
-        {
-          id: "session-yuto-1",
-          startedAt: "2025-02-09 19:10",
-          messages: [
-            {
-              role: "assistant",
-              text: "はじめまして、ゆうとくん。きょうはいっしょに、じこしょうかいをれんしゅうしよう。",
-            },
-            {
-              role: "user",
-              text: "ぼくは、ゆうとです。",
-            },
-            {
-              role: "assistant",
-              text: "いいね！そのあとに、すきなものも言ってみる？",
-            },
-            {
-              role: "user",
-              text: "すきなものは、レゴとでんしゃ！",
-            },
-          ],
-        },
-      ],
-    },
-  ],
-};
+export default function Page() {
+  const [mounted, setMounted] = useState(false);
 
-export default function GuardianPage() {
-  const router = useRouter();
+  const [week, setWeek] = useState<WeekId>("week1");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [grade, setGrade] = useState<Grade>("小3");
+  const [nickname, setNickname] = useState("");
 
-  // Supabase から読んだ保護者名（なければ null）
-  const [parentNameFromDb, setParentNameFromDb] = useState<string | null>(null);
-  // Supabase から読んだ子ども一覧（なければ [] → fallback を使う）
-  const [childrenFromDb, setChildrenFromDb] = useState<Child[]>([]);
-  // 選択中の子どものID
-  const [selectedChildId, setSelectedChildId] = useState(
-    fallbackParent.children[0]?.id ?? ""
-  );
-  // 会話ログモーダル
-  const [isLogOpen, setIsLogOpen] = useState(false);
-  const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
+  const [showProfile, setShowProfile] = useState(false);
 
-  // 🔍 ログインチェック＋ parent / children / chat_sessions 読み込み
+  // ★ childId は「URL→localStorage→空」の順で決める（入力欄は出さない）
+  const [childId, setChildId] = useState<string>("");
+
+  const isSending = useRef(false);
+  const [input, setInput] = useState("");
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  // ★ messages の最新値を参照するための ref（send/endConversation の取りこぼし防止）
+  const messagesRef = useRef<Msg[]>([]);
+
+  // 初回マウント時だけ localStorage & URL 読み込み
   useEffect(() => {
-    const fetchParentAndChildren = async () => {
-      // ① ログイン中ユーザー取得
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
+    try {
+      // week
+      const savedWeek = (localStorage.getItem(LS_WEEK) as WeekId) ?? "week1";
+      const initialWeek = savedWeek in weeks ? savedWeek : "week1";
+      setWeek(initialWeek);
 
-      console.log("Logged in user:", user);
-
-      if (userError) {
-        console.error("getUser error:", userError.message);
-        return;
-      }
-
-      if (!user) {
-        // 未ログインならログイン画面へ
-        router.push("/guardian/login");
-        return;
-      }
-
-      // ② parent 取得（user_id 紐づけ）
-      const { data: parentRows, error: parentError } = await supabase
-        .from("parent")
-        .select("id, name")
-        .eq("user_id", user.id)
-        .limit(1);
-
-      console.log("parentRows:", parentRows);
-
-      if (parentError) {
-        console.error("parent error:", parentError.message);
-        return;
-      }
-
-      if (!parentRows || parentRows.length === 0) {
-        console.log("No parent for this user. Use fallback.");
-        return;
-      }
-
-      const parentRow = parentRows[0] as any;
-      const parentId = parentRow.id as string | undefined;
-
-      if (parentRow.name) {
-        setParentNameFromDb(parentRow.name);
-      }
-
-      if (!parentId) return;
-
-      // ③ children 取得
-      const { data: childrenRows, error: childrenError } = await supabase
-        .from("children")
-        .select("*")
-        .eq("parent_id", parentId);
-
-      console.log("childrenRows:", childrenRows);
-
-      if (childrenError) {
-        console.error("children error:", childrenError.message);
-        return;
-      }
-
-      if (!childrenRows || childrenRows.length === 0) {
-        return;
-      }
-
-            const children = childrenRows as any[];
-
-      // ④ 各 child.id ごとに chat_sessions を取得
-      const sessionsMap: Record<string, ChatSession[]> = {};
-
-      for (const c of children) {
-        const { data: sessions, error: sessionsError } = await supabase
-          .from("chat_sessions")
-          .select("*")
-          .eq("child_id", c.id)
-          .order("created_at", { ascending: false })
-          .limit(3);
-
-        console.log("chat_sessions for child", c.id, sessions);
-
-        if (sessionsError) {
-          console.error(
-            "chat_sessions error for child",
-            c.id,
-            sessionsError.message
-          );
-          continue;
+      // history
+      const raw = localStorage.getItem(LS_HISTORY);
+      if (raw) {
+        try {
+          const arr = JSON.parse(raw) as any[];
+          setMessages(arr.map(ensureMsgShape));
+        } catch {
+          const opening = weeks[initialWeek].openingMessage;
+          setMessages([
+            {
+              id: newId(),
+              ts: new Date().toISOString(),
+              role: "assistant",
+              content: opening,
+            },
+          ]);
         }
-
-        sessionsMap[c.id] = (sessions ?? []).map((s: any) => ({
-          id: s.id as string,
-          startedAt: (s.created_at as string) ?? "",
-          messages: (s.messages as ChatMessage[]) ?? [],
-        }));
+      } else {
+        const opening = weeks[initialWeek].openingMessage;
+        setMessages([
+          {
+            id: newId(),
+            ts: new Date().toISOString(),
+            role: "assistant",
+            content: opening,
+          },
+        ]);
       }
 
-      // 🔽 ここを修正（growth_points ＋ recentSessions も含める）
-      const mapped: Child[] = children.map((c) => ({
-        id: c.id as string,
-        name: (c.name as string) ?? "ななしさん",
-        grade: (c.grade as string) ?? "",
-        avatarLabel: (c.avatar_label as string) ?? "",
-        favorites: Array.isArray(c.favorites)
-          ? (c.favorites as string[])
-          : [],
-        strength: (c.strength as string) ?? "",
-        thisWeek: {
-          theme: "今週のテーマは準備中です",
-          conversationCount: sessionsMap[c.id]?.length ?? 0,
-          highlight:
-            sessionsMap[c.id] && sessionsMap[c.id].length > 0
-              ? "最近の会話ログからピックアップしています。"
-              : "",
-        },
-        freeTrialDaysLeft: 7,
-        growthPoints: Array.isArray(c.growth_points)
-          ? (c.growth_points as string[])
-          : [],
-        nextReportLabel: "次回：準備中",
-        recentSessions: sessionsMap[c.id] ?? [],
-      }));
+      // profile
+      const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
+      if (p?.grade) setGrade(p.grade as Grade);
+      if (p?.nickname) setNickname(p.nickname as string);
 
-      setChildrenFromDb(mapped);
+      // childId: URL ?childId=... が最優先
+      const sp = new URLSearchParams(window.location.search);
+      const fromUrl = sp.get("childId") ?? "";
+      const fromLs = localStorage.getItem(LS_CHILD_ID) ?? "";
+      const decided = (fromUrl || fromLs || "").trim();
+      setChildId(decided);
+      if (decided) localStorage.setItem(LS_CHILD_ID, decided);
+    } finally {
+      setMounted(true);
+    }
+  }, []);
 
+  // 永続化
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
+  }, [messages, mounted]);
 
+  // messagesRef を常に最新へ
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
-      setChildrenFromDb(mapped);
+  useEffect(() => {
+    if (!mounted) return;
+    const profile = {
+      grade,
+      nickname: nickname || undefined,
+    };
+    localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
+  }, [grade, nickname, mounted]);
 
-      // Supabase から子どもが取れたら、最初の1人を選択
-      if (mapped.length > 0) {
-        setSelectedChildId(mapped[0].id);
-      }
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(LS_WEEK, week);
+  }, [week, mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    if (childId) localStorage.setItem(LS_CHILD_ID, childId);
+  }, [childId, mounted]);
+
+  const profileForApi = useMemo(
+    () => ({
+      grade,
+      nickname: nickname || undefined,
+    }),
+    [grade, nickname]
+  );
+
+  async function send() {
+    if (!input.trim() || isSending.current) return;
+    isSending.current = true;
+
+    const me: Msg = {
+      id: newId(),
+      ts: new Date().toISOString(),
+      role: "user",
+      content: input.trim(),
     };
 
-    fetchParentAndChildren();
-  }, [router]);
+    // ★ ここで最新の messages から next を作る（stale state 対策）
+    const nextForUi = [...messagesRef.current, me];
+    setMessages(nextForUi);
+    setInput("");
 
-  // ✅ 「Supabaseがあれば上書き・なければそのまま」
-  const parent: ParentData = {
-    ...fallbackParent,
-    ...(parentNameFromDb ? { name: parentNameFromDb } : {}),
-    ...(childrenFromDb.length > 0 ? { children: childrenFromDb } : {}),
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childId,
+          week,
+          // DBには軽量に：role/text だけ送る（あなたの save-session 仕様に合わせてOK）
+          messages: messagesRef.current.map(({ role, content }) => ({
+            role,
+            text: content,
+          })),
+        }),
+      const data = await res.json();
+      const reply: Msg = {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: data.reply ?? "（返答がなかったよ）",
+      };
+      setMessages((prev) => [...prev, reply]);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: newId(),
+          ts: new Date().toISOString(),
+          role: "assistant",
+          content: "エラーが起きたみたい。もう一度ためしてみてね。",
+        },
+      ]);
+    } finally {
+      isSending.current = false;
+      queueMicrotask(() =>
+        endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
+      );
+    }
+  }
+
+  // week 切り替え：導入メッセージを新しく足す（履歴は残す）
+  function handleWeekChange(newWeek: WeekId) {
+    setWeek(newWeek);
+    const opening = weeks[newWeek].openingMessage;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: opening,
+      },
+    ]);
+  }
+
+  // 会話をすべて消して、現在の week の最初のメッセージだけに戻す
+  function resetAll() {
+    const w = week;
+    const opening = weeks[w].openingMessage;
+    const init: Msg[] = [
+      {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: opening,
+      },
+    ];
+    setMessages(init);
+    if (mounted) localStorage.setItem(LS_HISTORY, JSON.stringify(init));
+  }
+
+  function handleResetClick() {
+    if (
+      !window.confirm(
+        "これまでのおはなしを ぜんぶ けして、さいしょから はじめるよ。いいかな？"
+      )
+    ) {
+      return;
+    }
+    resetAll();
+  }
+
+  // ★ 会話終了：save-session を叩く（childId がない場合は保存しない）
+  async function endConversation() {
+    if (!window.confirm("会話を終了して、きろくを保存するよ。いいかな？")) return;
+
+    // childId が空なら、保存はスキップ（デプロイ確認中の事故防止）
+    if (!childId) {
+      alert(
+        "childId が未設定のため、保存をスキップしました。\n（本番では保護者画面→子ども選択→childId自動付与にします）"
+      );
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/save-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childId,
+          week,
+          // DBには軽量に：role/text だけ送る（あなたの save-session 仕様に合わせてOK）
+          messages: messagesRef.current.map(({ role, content }) => ({
+            role,
+            text: content,
+          })),
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error ?? "save-session failed");
+      }
+
+      alert("保存しました！保護者マイページで確認できます。");
+    } catch (e) {
+      console.error(e);
+      alert("保存に失敗しました。Vercel Logs と Supabase を確認してね。");
+    }
+  }
+
+  const lastAssistant =
+    [...messages].reverse().find((m) => m.role === "assistant") ??
+    ({
+      id: "intro",
+      ts: new Date().toISOString(),
+      role: "assistant",
+      content: weeks[week].openingMessage,
+    } as Msg);
+
+  if (!mounted) {
+    return (
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: 16 }}>
+        <div style={{ width: 160, height: 24, background: "#eee", borderRadius: 4 }} />
+      </div>
+    );
+  }
+
+  // ---------- スタイル ----------
+
+  const pageStyle: CSSProperties = {
+    minHeight: "100vh",
+    background: "#f3f4f6",
+    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+  };
+  const shellStyle: CSSProperties = {
+    maxWidth: 960,
+    margin: "0 auto",
+    padding: 16,
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  };
+  const headerRow: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  };
+  const leftHeader: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  };
+  const titleStyle: CSSProperties = { fontSize: 24, fontWeight: 700 };
+  const weekBadge: CSSProperties = {
+    fontSize: 12,
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#dbeafe",
+    border: "1px solid #bfdbfe",
+    marginLeft: 12,
+    whiteSpace: "nowrap",
+  };
+  const profileToggle: CSSProperties = {
+    fontSize: 12,
+    padding: "4px 8px",
+    borderRadius: 999,
+    border: "1px solid #d1d5db",
+    background: "#ffffff",
+    cursor: "pointer",
   };
 
-  const hasMultipleChildren = parent.children.length > 1;
-
-  const selectedChild =
-    parent.children.find((c) => c.id === selectedChildId) ??
-    parent.children[0];
-
-  const child = selectedChild;
-
-  // ログアウト動作
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    router.push("/guardian/login");
+  // ★ 会話終了ボタン：目立つ色＆位置（ヘッダー右端）
+  const endButton: CSSProperties = {
+    fontSize: 12,
+    padding: "6px 12px",
+    borderRadius: 999,
+    border: "1px solid #fb923c",
+    background: "#fff7ed",
+    color: "#9a3412",
+    cursor: "pointer",
+    fontWeight: 700,
   };
 
-  const handleOpenLog = () => {
-    console.log("open log clicked, recentSessions:", child.recentSessions);
-    const latest = child.recentSessions[0] ?? null;
-    setActiveSession(latest);
-    setIsLogOpen(true);
+  const profileGrid: CSSProperties = {
+    display: showProfile ? "grid" : "none",
+    gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
+    background: "#ffffff",
+    border: "1px solid #e5e7eb",
+    fontSize: 12,
+  };
+  const labelRow: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 4,
+  };
+  const labelText: CSSProperties = { flexShrink: 0, width: 64 };
+  const inputStyle: CSSProperties = {
+    flex: 1,
+    borderRadius: 4,
+    border: "1px solid #d1d5db",
+    padding: "4px 8px",
+    fontSize: 12,
+  };
+  const selectStyle = inputStyle;
+
+  const mainGrid: CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "7fr 3fr",
+    gap: 0,
+    alignItems: "stretch",
   };
 
-  const handleCloseLog = () => {
-    setIsLogOpen(false);
+  const leftPanel: CSSProperties = {
+    padding: 24,
+    position: "relative",
+    height: "65vh",
+    backgroundImage: 'url("/classpicture.png")',
+    backgroundSize: "cover",
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
+    borderRadius: 16,
   };
+
+  const bigBubbleWrapper: CSSProperties = {
+    display: "flex",
+    justifyContent: "flex-start",
+    alignItems: "flex-start",
+  };
+  const bigBubble: CSSProperties = {
+    width: "100%",
+    maxWidth: 520,
+    minHeight: 180,
+    borderRadius: 32,
+    border: "4px solid #4b5563",
+    boxShadow: "6px 6px 0 rgba(0, 0, 0, 0.15)",
+    padding: 20,
+    fontSize: 15,
+    lineHeight: 1.7,
+    background: "#f9fafb",
+  };
+
+  // アイ先生（指定のサイズ・位置で固定）
+  const teacherImageStyle: CSSProperties = {
+    position: "absolute",
+    left: 270,
+    top: "65%",
+    transform: "translateY(-50%)",
+    width: 270,
+    height: 800,
+    objectFit: "contain",
+    pointerEvents: "none",
+  };
+
+  const rightPanel: CSSProperties = {
+    borderLeft: "2px solid #d1d5db",
+    padding: 16,
+    background: "#ffffff",
+    display: "flex",
+    flexDirection: "column",
+    height: "65vh",
+    overflow: "hidden",
+    fontSize: 12,
+  };
+  const historyHeader: CSSProperties = {
+    fontWeight: 600,
+    fontSize: 12,
+    marginBottom: 8,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  };
+
+  // ★ 右ペインにも小さめの会話終了（見つけやすさUP）
+  const endMiniBtn: CSSProperties = {
+    fontSize: 11,
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: "1px solid #fb923c",
+    background: "#fff7ed",
+    color: "#9a3412",
+    cursor: "pointer",
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+  };
+
+  const historyList: CSSProperties = {
+    flex: 1,
+    overflowY: "auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  };
+  const historyBubbleBase: CSSProperties = {
+    maxWidth: "85%",
+    padding: "7px 10px",
+    borderRadius: 18,
+    boxShadow: "0 1px 2px rgba(0, 0, 0, 0.08)",
+  };
+  const historyHeaderRow: CSSProperties = {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: 10,
+    color: "#6b7280",
+    marginBottom: 2,
+  };
+
+  const footerRow: CSSProperties = {
+    marginTop: 8,
+    padding: "10px 14px",
+    borderRadius: 16,
+    background: "#ffffff",
+    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.08)",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  };
+  const footerLabel: CSSProperties = {
+    fontSize: 12,
+    color: "#4b5563",
+    whiteSpace: "nowrap",
+  };
+  const inputFooter: CSSProperties = {
+    flex: 1,
+    borderRadius: 999,
+    border: "2px solid #3b82f6",
+    padding: "8px 14px",
+    fontSize: 13,
+    background: "#ffffff",
+  };
+  const sendButton: CSSProperties = {
+    borderRadius: 999,
+    border: "none",
+    padding: "8px 16px",
+    fontSize: 13,
+    background: "#3b82f6",
+    color: "#ffffff",
+    cursor: "pointer",
+  };
+
+  // ★ フッターにも会話終了（最終的に必ず見つかる）
+  const endFooterButton: CSSProperties = {
+    borderRadius: 999,
+    border: "1px solid #fb923c",
+    padding: "8px 14px",
+    fontSize: 13,
+    background: "#fff7ed",
+    color: "#9a3412",
+    cursor: "pointer",
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+  };
+
+  const weekOptions = Object.entries(weeks).map(([id, cfg]) => ({
+    id: id as WeekId,
+    label: `Week${id.replace("week", "")}: ${
+      cfg.title.split("→")[0]?.trim() ?? cfg.title
+    }`,
+  }));
 
   return (
-    <div className="page">
-      {/* 上部ヘッダー */}
-      <header className="header">
-        <div className="header-inner">
-          <div className="brand">
-            <div className="brand-main">AI SENSEI</div>
-            <div className="brand-sub">保護者マイページ</div>
+    <div style={pageStyle}>
+      <div style={shellStyle}>
+        {/* ヘッダー */}
+        <div style={headerRow}>
+          <div style={leftHeader}>
+            <div style={titleStyle}>あい先生</div>
           </div>
-          <button className="logout-btn" onClick={handleLogout}>
-            ログアウト
-          </button>
-        </div>
-      </header>
 
-      {/* 🔥 カフェ背景＋中央あいさつ */}
-      <section className="hero">
-        <div className="hero-greeting">
-          <div>
-            {parent.name} 様、{parent.greetingTime}。
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={weekBadge}>週: {week}</span>
+
+            <button
+              type="button"
+              style={profileToggle}
+              onClick={() => setShowProfile((v) => !v)}
+            >
+              プロフィール {showProfile ? "▲" : "▼"}
+            </button>
+
+            <button
+              type="button"
+              style={{
+                fontSize: 12,
+                padding: "4px 10px",
+                borderRadius: 999,
+                border: "1px solid #f97373",
+                background: "#fee2e2",
+                color: "#b91c1c",
+                cursor: "pointer",
+              }}
+              onClick={handleResetClick}
+            >
+              はじめから
+            </button>
+
+            {/* ★ 目立つ会話終了（ヘッダー右端） */}
+            <button type="button" style={endButton} onClick={endConversation}>
+              会話終了
+            </button>
           </div>
-          <div>
-            今日の <span>{child.name}</span> のようすを、
-            やわらかくまとめました。
+        </div>
+
+        {/* プロフィール（トグル表示） */}
+        <div style={profileGrid}>
+          <label style={labelRow}>
+            <span style={labelText}>学年</span>
+            <select
+              style={selectStyle}
+              value={grade}
+              onChange={(e) => setGrade(e.target.value as Grade)}
+            >
+              {grades.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label style={{ ...labelRow, gridColumn: "3 / span 1" }}>
+            <span style={{ ...labelText, width: 80 }}>ニックネーム</span>
+            <input
+              style={inputStyle}
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              placeholder="たろう など"
+            />
+          </label>
+
+          <label style={{ ...labelRow, gridColumn: "6 / span 1" }}>
+            <span style={labelText}>週</span>
+            <select
+              style={selectStyle}
+              value={week}
+              onChange={(e) => handleWeekChange(e.target.value as WeekId)}
+            >
+              {weekOptions.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {/* ★ childId の入力欄は削除（本番は自動で渡す） */}
+          {/* （確認用に childId を表示したい場合は、下のコメントを外して “表示だけ” にできます）
+          <div style={{ gridColumn: "1 / -1", color: "#6b7280", fontSize: 11 }}>
+            childId: {childId ? childId : "（未設定）"}
           </div>
+          */}
         </div>
 
-        <div className="hero-scroll">
-          <span>scroll</span>
-          <div className="hero-scroll-line" />
-        </div>
-      </section>
-
-      {/* ダッシュボード本体（スクロール後のゾーン） */}
-      <main className="content">
-        <section>
-          {/* あいさつ文は hero に移したので、ここは子ども切り替えだけ */}
-          {hasMultipleChildren && (
-            <div className="child-selector">
-              <label htmlFor="child-select">お子さまを選ぶ</label>
-              <select
-                id="child-select"
-                value={selectedChildId}
-                onChange={(e) => setSelectedChildId(e.target.value)}
-              >
-                {parent.children.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}（{c.grade}）
-                  </option>
-                ))}
-              </select>
+        {/* 左右 2 ペイン */}
+        <div style={mainGrid}>
+          {/* 左：背景画像つきエリア */}
+          <section style={leftPanel}>
+            <div style={bigBubbleWrapper}>
+              <div style={bigBubble}>{lastAssistant.content}</div>
             </div>
-          )}
-        </section>
+            <Image
+              src="/ai-sensei.png"
+              alt="あい先生"
+              width={360}
+              height={540}
+              style={teacherImageStyle}
+            />
+          </section>
 
-        <section className="grid">
-          {/* 左カラム */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            {/* プロフィールカード */}
-            <article className="card">
-              <div className="card-header">
-                <div className="card-title">profile</div>
-                <div className="card-tag">お子さま情報</div>
-              </div>
-              <div className="card-body">
-                <div className="profile-row">
-                  <div className="avatar">{child.avatarLabel}</div>
-                  <div>
-                    <div className="profile-name">{child.name}</div>
-                    <div className="profile-grade">{child.grade}</div>
-                  </div>
-                </div>
-                <div className="profile-meta">
-                  好きなもの：
-                  {child.favorites.join("・")}
-                  <br />
-                  得意なこと：{child.strength}
-                </div>
-                <div style={{ marginTop: 8 }}>
-                  <span className="link-underline">
-                    プロフィールを確認・編集する
-                  </span>
-                </div>
-              </div>
-            </article>
-
-            {/* 今週のようすカード */}
-            <article className="card">
-              <div className="card-header">
-                <div className="card-title">this week</div>
-                <div className="card-tag">今週のようす</div>
-              </div>
-              <div className="card-body">
-                <div className="pill-heading">今週のテーマ</div>
-                <div
-                  style={{
-                    fontSize: 13,
-                    marginBottom: 8,
-                  }}
-                >
-                  「{child.thisWeek.theme}」
-                </div>
-                <div className="week-items">
-                  <div>
-                    <span className="label">会話回数：</span>
-                    {child.thisWeek.conversationCount}回
-                  </div>
-                  <div>
-                    <span className="label">今週の一言：</span>
-                    {child.thisWeek.highlight}
-                  </div>
-                  <div>
-                    <span className="label">無料期間：</span>
-                    あと{child.freeTrialDaysLeft}日
-                  </div>
-                </div>
-              </div>
-            </article>
-          </div>
-
-          {/* 右カラム */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            {/* ことば成長メモ */}
-            <article className="card">
-              <div className="card-header">
-                <div className="card-title">growth</div>
-                <div className="card-tag">ことば成長メモ</div>
-              </div>
-              <div className="card-body">
-                <div className="pill-heading">
-                  この1週間でできるようになったこと
-                </div>
-                <ul className="growth-list">
-                  {child.growthPoints.map((point, i) => (
-                    <li key={i}>{point}</li>
-                  ))}
-                </ul>
-                <p
-                  style={{
-                    fontSize: 11,
-                    color: "var(--soft-brown)",
-                    marginTop: 8,
-                  }}
-                >
-                  ※ あい先生との会話の中から、印象的だった場面をピックアップしています。
-                </p>
-              </div>
-            </article>
-
-            {/* レポート＆ログ */}
-            <article className="card">
-              <div className="card-header">
-                <div className="card-title">records</div>
-                <div className="card-tag">レポートと記録</div>
-              </div>
-              <div className="card-body">
-                <div className="report-actions">
-                  <button
-                    type="button"
-                    className="report-link report-link-button"
-                    onClick={handleOpenLog}
-                  >
-                    <span>会話ログをひらく</span>
-                    <small>最近3回分を表示（仮）</small>
-                  </button>
-                  <div className="report-link">
-                    <span>ことば成長レポートを見る</span>
-                    <small>{child.nextReportLabel}</small>
-                  </div>
-                </div>
-                <p className="report-note">
-                  ※ レポートは2か月に1度、PDF形式でお渡しします。
-                </p>
-              </div>
-            </article>
-          </div>
-        </section>
-      </main>
-
-      {/* 🗨 会話ログモーダル */}
-      {isLogOpen && (
-        <div className="chat-modal-backdrop" onClick={handleCloseLog}>
-          <div
-            className="chat-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="chat-modal-header">
-              <div className="chat-modal-title">{child.name} の会話ログ</div>
-              <button
-                type="button"
-                className="chat-modal-close"
-                onClick={handleCloseLog}
-              >
-                ×
+          {/* 右：LINE風トーク履歴 */}
+          <aside style={rightPanel}>
+            <div style={historyHeader}>
+              <span>おはなしのきろく</span>
+              <button type="button" style={endMiniBtn} onClick={endConversation}>
+                会話終了
               </button>
             </div>
-            <div className="chat-modal-sub">
-              {activeSession
-                ? `${activeSession.startedAt} ごろの会話`
-                : "まだ会話ログが登録されていません。"}
-            </div>
-            <div className="chat-modal-body">
-              {activeSession ? (
-                activeSession.messages.map((m, idx) => (
-                  <div
-                    key={idx}
-                    className={
-                      m.role === "user"
-                        ? "chat-bubble chat-bubble-user"
-                        : "chat-bubble chat-bubble-assistant"
-                    }
-                  >
-                    <div className="chat-bubble-role">
-                      {m.role === "user" ? child.name : "あい先生"}
+
+            <div style={historyList}>
+              {messages.map((m) => {
+                const isUser = m.role === "user";
+                const bubbleStyle: CSSProperties = {
+                  ...historyBubbleBase,
+                  alignSelf: isUser ? "flex-end" : "flex-start",
+                  background: isUser ? "#DCF8C6" : "#E3F2FF",
+                };
+                return (
+                  <div key={m.id} id={m.id} style={bubbleStyle}>
+                    <div style={historyHeaderRow}>
+                      <span>{isUser ? "あなた" : "あい先生"}</span>
+                      <span>{hhmm(m.ts)}</span>
                     </div>
-                    <div className="chat-bubble-text">{m.text}</div>
+                    <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                      {m.content}
+                    </div>
                   </div>
-                ))
-              ) : (
-                <p className="chat-modal-empty">
-                  Supabase に会話ログが追加されると、ここに表示されます。
-                </p>
-              )}
+                );
+              })}
+              <div ref={endRef} />
             </div>
-          </div>
+          </aside>
         </div>
-      )}
+
+        {/* 入力欄 */}
+        <div style={footerRow}>
+          <span style={footerLabel}>あなたのこたえ</span>
+
+          <input
+            style={inputFooter}
+            placeholder="メッセージを入力してください"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") send();
+            }}
+          />
+
+          <button
+            type="button"
+            style={{
+              ...sendButton,
+              opacity: input.trim() ? 1 : 0.5,
+              pointerEvents: input.trim() ? "auto" : "none",
+            }}
+            onClick={send}
+          >
+            送信
+          </button>
+
+          {/* ★ フッターにも会話終了（最強に見つかる） */}
+          <button type="button" style={endFooterButton} onClick={endConversation}>
+            会話終了
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

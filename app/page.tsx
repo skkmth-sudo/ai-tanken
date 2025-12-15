@@ -1,4 +1,6 @@
-﻿"use client";
+﻿
+
+"use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Image from "next/image";
@@ -14,6 +16,7 @@ type Msg = {
 const LS_HISTORY = "ai-tanken:history";
 const LS_PROFILE = "ai-tanken:profile";
 const LS_WEEK = "ai-tanken:week";
+// ★ childId は「保存はする」が「手入力はさせない」
 const LS_CHILD_ID = "ai-tanken:childId";
 
 const grades: Grade[] = ["小1", "小2", "小3", "小4", "小5", "小6"];
@@ -38,6 +41,25 @@ function hhmm(iso: string) {
   return `${h}:${m}`;
 }
 
+// ★ Supabase Auth の access_token を localStorage から拾う（キー名がプロジェクトごとに違うため探索）
+function getSupabaseAccessTokenFromLocalStorage(): string {
+  try {
+    if (typeof window === "undefined") return "";
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i) ?? "";
+      if (!key.startsWith("sb-") || !key.endsWith("-auth-token")) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      const token = parsed?.access_token ?? parsed?.currentSession?.access_token;
+      if (typeof token === "string" && token.length > 10) return token;
+    }
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
 export default function Page() {
   const [mounted, setMounted] = useState(false);
 
@@ -46,22 +68,27 @@ export default function Page() {
   const [grade, setGrade] = useState<Grade>("小3");
   const [nickname, setNickname] = useState("");
 
-  // ★ Supabase children.id（UUID）を入れる（localStorageに保存）
-  const [childId, setChildId] = useState("");
-
   const [showProfile, setShowProfile] = useState(false);
+
+  // ★ childId は「URL→localStorage→空」の順で決める（入力欄は出さない）
+  const [childId, setChildId] = useState<string>("");
 
   const isSending = useRef(false);
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  // 初回マウント時だけ localStorage 読み込み
+  // ★ messages の最新値を参照するための ref（send/endConversation の取りこぼし防止）
+  const messagesRef = useRef<Msg[]>([]);
+
+  // 初回マウント時だけ localStorage & URL 読み込み
   useEffect(() => {
     try {
+      // week
       const savedWeek = (localStorage.getItem(LS_WEEK) as WeekId) ?? "week1";
       const initialWeek = savedWeek in weeks ? savedWeek : "week1";
       setWeek(initialWeek);
 
+      // history
       const raw = localStorage.getItem(LS_HISTORY);
       if (raw) {
         try {
@@ -90,25 +117,34 @@ export default function Page() {
         ]);
       }
 
+      // profile
       const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
       if (p?.grade) setGrade(p.grade as Grade);
       if (p?.nickname) setNickname(p.nickname as string);
 
-      // ★ childId
-      const savedChildId = localStorage.getItem(LS_CHILD_ID) ?? "";
-      setChildId(savedChildId);
+      // childId: URL ?childId=... が最優先
+      const sp = new URLSearchParams(window.location.search);
+      const fromUrl = sp.get("childId") ?? "";
+      const fromLs = localStorage.getItem(LS_CHILD_ID) ?? "";
+      const decided = (fromUrl || fromLs || "").trim();
+      setChildId(decided);
+      if (decided) localStorage.setItem(LS_CHILD_ID, decided);
     } finally {
       setMounted(true);
     }
   }, []);
 
-  // 永続化（履歴）
+  // 永続化
   useEffect(() => {
     if (!mounted) return;
     localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
   }, [messages, mounted]);
 
-  // 永続化（プロフィール）
+  // messagesRef を常に最新へ
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   useEffect(() => {
     if (!mounted) return;
     const profile = {
@@ -118,16 +154,14 @@ export default function Page() {
     localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
   }, [grade, nickname, mounted]);
 
-  // 永続化（週）
   useEffect(() => {
     if (!mounted) return;
     localStorage.setItem(LS_WEEK, week);
   }, [week, mounted]);
 
-  // 永続化（childId）
   useEffect(() => {
     if (!mounted) return;
-    localStorage.setItem(LS_CHILD_ID, childId);
+    if (childId) localStorage.setItem(LS_CHILD_ID, childId);
   }, [childId, mounted]);
 
   const profileForApi = useMemo(
@@ -148,7 +182,10 @@ export default function Page() {
       role: "user",
       content: input.trim(),
     };
-    setMessages((prev) => [...prev, me]);
+
+    // ★ ここで最新の messages から next を作る（stale state 対策）
+    const nextForUi = [...messagesRef.current, me];
+    setMessages(nextForUi);
     setInput("");
 
     try {
@@ -156,13 +193,17 @@ export default function Page() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: [...messages, me]
-            .slice(-16)
-            .map(({ role, content }) => ({ role, content })),
+          childId,
           week,
+          // /api/chat には "今の入力" を含めて送る
+          messages: nextForUi.slice(-16).map(({ role, content }) => ({
+            role,
+            content,
+          })),
           profile: profileForApi,
         }),
       });
+
       const data = await res.json();
       const reply: Msg = {
         id: newId(),
@@ -186,36 +227,6 @@ export default function Page() {
       queueMicrotask(() =>
         endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
       );
-    }
-  }
-
-  // ★ 会話終了（保存）
-  async function endConversation() {
-    if (!childId.trim()) {
-      alert("child_id が空です。プロフィールを開いて child_id（children.id）を入れてください。");
-      return;
-    }
-
-    try {
-      const res = await fetch("/api/save-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          childId: childId.trim(),
-          messages: messages.map(({ role, content }) => ({ role, content })),
-        }),
-      });
-
-      const data = await res.json();
-
-      if (!data.ok) {
-        alert("保存に失敗: " + (data.error ?? "unknown"));
-        return;
-      }
-
-      alert("会話ログを保存しました！（guardian 側に反映されます）");
-    } catch (e: any) {
-      alert("保存中にエラー: " + (e?.message ?? "unknown"));
     }
   }
 
@@ -259,6 +270,50 @@ export default function Page() {
       return;
     }
     resetAll();
+  }
+
+  // ★ 会話終了：save-session を叩く（childId がない場合は保存しない）
+  async function endConversation() {
+    if (!window.confirm("会話を終了して、きろくを保存するよ。いいかな？")) return;
+
+    // childId が空なら、保存はスキップ（デプロイ確認中の事故防止）
+    if (!childId) {
+      alert(
+        "childId が未設定のため、保存をスキップしました。\n（本番では保護者画面→子ども選択→childId自動付与にします）"
+      );
+      return;
+    }
+
+    try {
+      const token = getSupabaseAccessTokenFromLocalStorage();
+
+      const res = await fetch("/api/save-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          childId,
+          week,
+          // DBには軽量に：role/text だけ送る（あなたの save-session 仕様に合わせてOK）
+          messages: messagesRef.current.map(({ role, content }) => ({
+            role,
+            text: content,
+          })),
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error ?? "save-session failed");
+      }
+
+      alert("保存しました！保護者マイページで確認できます。");
+    } catch (e) {
+      console.error(e);
+      alert("保存に失敗しました。Vercel Logs と Supabase を確認してね。");
+    }
   }
 
   const lastAssistant =
@@ -320,6 +375,18 @@ export default function Page() {
     border: "1px solid #d1d5db",
     background: "#ffffff",
     cursor: "pointer",
+  };
+
+  // ★ 会話終了ボタン：目立つ色＆位置（ヘッダー右端）
+  const endButton: CSSProperties = {
+    fontSize: 12,
+    padding: "6px 12px",
+    borderRadius: 999,
+    border: "1px solid #fb923c",
+    background: "#fff7ed",
+    color: "#9a3412",
+    cursor: "pointer",
+    fontWeight: 700,
   };
 
   const profileGrid: CSSProperties = {
@@ -409,7 +476,25 @@ export default function Page() {
     fontWeight: 600,
     fontSize: 12,
     marginBottom: 8,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
   };
+
+  // ★ 右ペインにも小さめの会話終了（見つけやすさUP）
+  const endMiniBtn: CSSProperties = {
+    fontSize: 11,
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: "1px solid #fb923c",
+    background: "#fff7ed",
+    color: "#9a3412",
+    cursor: "pointer",
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+  };
+
   const historyList: CSSProperties = {
     flex: 1,
     overflowY: "auto",
@@ -464,9 +549,24 @@ export default function Page() {
     cursor: "pointer",
   };
 
+  // ★ フッターにも会話終了（最終的に必ず見つかる）
+  const endFooterButton: CSSProperties = {
+    borderRadius: 999,
+    border: "1px solid #fb923c",
+    padding: "8px 14px",
+    fontSize: 13,
+    background: "#fff7ed",
+    color: "#9a3412",
+    cursor: "pointer",
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+  };
+
   const weekOptions = Object.entries(weeks).map(([id, cfg]) => ({
     id: id as WeekId,
-    label: `Week${id.replace("week", "")}: ${cfg.title.split("→")[0]?.trim() ?? cfg.title}`,
+    label: `Week${id.replace("week", "")}: ${
+      cfg.title.split("→")[0]?.trim() ?? cfg.title
+    }`,
   }));
 
   return (
@@ -477,7 +577,8 @@ export default function Page() {
           <div style={leftHeader}>
             <div style={titleStyle}>あい先生</div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <span style={weekBadge}>週: {week}</span>
 
             <button
@@ -486,22 +587,6 @@ export default function Page() {
               onClick={() => setShowProfile((v) => !v)}
             >
               プロフィール {showProfile ? "▲" : "▼"}
-            </button>
-
-            {/* ★ 会話終了（保存） */}
-            <button
-              type="button"
-              style={{
-                fontSize: 12,
-                padding: "4px 10px",
-                borderRadius: 999,
-                border: "1px solid #d1d5db",
-                background: "#ffffff",
-                cursor: "pointer",
-              }}
-              onClick={endConversation}
-            >
-              会話終了（保存）
             </button>
 
             <button
@@ -518,6 +603,11 @@ export default function Page() {
               onClick={handleResetClick}
             >
               はじめから
+            </button>
+
+            {/* ★ 目立つ会話終了（ヘッダー右端） */}
+            <button type="button" style={endButton} onClick={endConversation}>
+              会話終了
             </button>
           </div>
         </div>
@@ -549,17 +639,6 @@ export default function Page() {
             />
           </label>
 
-          {/* ★ child_id 入力 */}
-          <label style={{ ...labelRow, gridColumn: "3 / span 2" }}>
-            <span style={{ ...labelText, width: 80 }}>child_id</span>
-            <input
-              style={inputStyle}
-              value={childId}
-              onChange={(e) => setChildId(e.target.value)}
-              placeholder="Supabaseの children.id（UUID）"
-            />
-          </label>
-
           <label style={{ ...labelRow, gridColumn: "6 / span 1" }}>
             <span style={labelText}>週</span>
             <select
@@ -574,6 +653,13 @@ export default function Page() {
               ))}
             </select>
           </label>
+
+          {/* ★ childId の入力欄は削除（本番は自動で渡す） */}
+          {/* （確認用に childId を表示したい場合は、下のコメントを外して “表示だけ” にできます）
+          <div style={{ gridColumn: "1 / -1", color: "#6b7280", fontSize: 11 }}>
+            childId: {childId ? childId : "（未設定）"}
+          </div>
+          */}
         </div>
 
         {/* 左右 2 ペイン */}
@@ -594,7 +680,13 @@ export default function Page() {
 
           {/* 右：LINE風トーク履歴 */}
           <aside style={rightPanel}>
-            <div style={historyHeader}>おはなしのきろく</div>
+            <div style={historyHeader}>
+              <span>おはなしのきろく</span>
+              <button type="button" style={endMiniBtn} onClick={endConversation}>
+                会話終了
+              </button>
+            </div>
+
             <div style={historyList}>
               {messages.map((m) => {
                 const isUser = m.role === "user";
@@ -623,6 +715,7 @@ export default function Page() {
         {/* 入力欄 */}
         <div style={footerRow}>
           <span style={footerLabel}>あなたのこたえ</span>
+
           <input
             style={inputFooter}
             placeholder="メッセージを入力してください"
@@ -632,6 +725,7 @@ export default function Page() {
               if (e.key === "Enter") send();
             }}
           />
+
           <button
             type="button"
             style={{
@@ -642,6 +736,11 @@ export default function Page() {
             onClick={send}
           >
             送信
+          </button>
+
+          {/* ★ フッターにも会話終了（最強に見つかる） */}
+          <button type="button" style={endFooterButton} onClick={endConversation}>
+            会話終了
           </button>
         </div>
       </div>
