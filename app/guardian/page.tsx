@@ -176,12 +176,15 @@ export default function Page() {
         body: JSON.stringify({
           childId,
           week,
-          // DBには軽量に：role/text だけ送る（あなたの save-session 仕様に合わせてOK）
-          messages: messagesRef.current.map(({ role, content }) => ({
+          // /api/chat には "今の入力" を含めて送る
+          messages: nextForUi.slice(-16).map(({ role, content }) => ({
             role,
-            text: content,
+            content,
           })),
+          profile: profileForApi,
         }),
+      });
+
       const data = await res.json();
       const reply: Msg = {
         id: newId(),
