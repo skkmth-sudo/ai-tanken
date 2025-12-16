@@ -3,7 +3,7 @@
   justify-content: center;
   align-items: center;
   height: 100vh;
-  background: url("/cafe-bg.jpg") center/cover no-repeat;
+  background: url("/cafe-background.jpg") center/cover no-repeat;
   backdrop-filter: blur(2px);
 }
 

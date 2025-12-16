@@ -3,8 +3,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
 import { weeks, type Grade, type WeekId } from "@/lib/persona";
+import { getAccessToken, supabase } from "@/lib/supabaseClient";
 
 type Msg = {
   id: string;
@@ -14,7 +16,17 @@ type Msg = {
 };
 
 const LS_HISTORY = "ai-tanken:history";
+
+function historyKey(childId: string) {
+  // childIdごとに履歴を分離（これで「その子のチャット」になる）
+  return `${LS_HISTORY}:${(childId || "_no_child").trim()}`;
+}
 const LS_PROFILE = "ai-tanken:profile";
+
+// ★ childId ごとにプロフィールを分離するキー
+function profileKey(childId: string) {
+  return `${LS_PROFILE}:${(childId || "_no_child").trim()}`;
+}
 const LS_WEEK = "ai-tanken:week";
 // ★ childId は「保存はする」が「手入力はさせない」
 const LS_CHILD_ID = "ai-tanken:childId";
@@ -40,35 +52,60 @@ function hhmm(iso: string) {
   const m = d.getMinutes().toString().padStart(2, "0");
   return `${h}:${m}`;
 }
+// ★ 「ニックネームを教えてね」への回答からだけ拾う（通常会話では拾わない）
+function extractNicknameFromNicknameAnswer(text: string): string | null {
+  let t = (text || "").trim();
+  if (!t) return null;
 
-// ★ Supabase Auth の access_token を localStorage から拾う（キー名がプロジェクトごとに違うため探索）
-function getSupabaseAccessTokenFromLocalStorage(): string {
-  try {
-    if (typeof window === "undefined") return "";
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i) ?? "";
-      if (!key.startsWith("sb-") || !key.endsWith("-auth-token")) continue;
-      const raw = localStorage.getItem(key);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
-      const token = parsed?.access_token ?? parsed?.currentSession?.access_token;
-      if (typeof token === "string" && token.length > 10) return token;
-    }
-  } catch {
-    // ignore
+  // 前置きの口癖を軽く除去
+  t = t.replace(/^(いま|今|えっと|あの|うーん|その|ええと)[、,\s]+/g, "");
+
+  // 例:「ぼくは たろう」「わたしは花子」「ぼくはたろうです」
+  const m1 = t.match(/(?:ぼく|僕|わたし|私)は\s*([ぁ-んァ-ヶ一-龠A-Za-z]{1,12})(?:です|だよ|だ)?/u);
+  if (m1?.[1]) return m1[1];
+
+  // 例:「なまえは たろう」「名前は花子です」
+  const m2 = t.match(/(?:名前|なまえ)は\s*([ぁ-んァ-ヶ一-龠A-Za-z]{1,12})(?:です|だよ|だ)?/u);
+  if (m2?.[1]) return m2[1];
+
+  // 例:「たろうです」「はなこだよ」
+  const m3 = t.match(/^([ぁ-んァ-ヶ一-龠A-Za-z]{1,12})\s*(?:です|だよ|だ)$/u);
+  if (m3?.[1]) return m3[1];
+
+  // ★ 最後の手段：1語だけの回答（例:「たなか」）
+  const m4 = t.match(/^([ぁ-んァ-ヶ一-龠A-Za-z]{2,8})$/u);
+  if (m4?.[1]) {
+    const NG = new Set(["はい", "うん", "えっと", "あの", "こんにちは", "ありがとう"]);
+    if (!NG.has(m4[1])) return m4[1];
   }
-  return "";
+
+  return null;
 }
 
+function isNicknamePrompt(text: string): boolean {
+  const t = (text || "").trim();
+  return /ニックネーム/.test(t) && /(教えて|おしえて|呼んでもいい|呼び方)/.test(t);
+}
+
+
 export default function Page() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [mounted, setMounted] = useState(false);
 
   const [week, setWeek] = useState<WeekId>("week1");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [grade, setGrade] = useState<Grade>("小3");
   const [nickname, setNickname] = useState("");
+  // ★ 自動取得は「最初のニックネーム質問に答えた時だけ」
+  const [nicknameLocked, setNicknameLocked] = useState(false);
 
   const [showProfile, setShowProfile] = useState(false);
+
+  // ★ 最新の nickname/lock を参照するための ref（非同期処理でのズレ防止）
+  const nicknameRef = useRef("");
+  const nicknameLockedRef = useRef(false);
+
 
   // ★ childId は「URL→localStorage→空」の順で決める（入力欄は出さない）
   const [childId, setChildId] = useState<string>("");
@@ -80,7 +117,7 @@ export default function Page() {
   // ★ messages の最新値を参照するための ref（send/endConversation の取りこぼし防止）
   const messagesRef = useRef<Msg[]>([]);
 
-  // 初回マウント時だけ localStorage & URL 読み込み
+  // 初回マウント時：week など（プロフィールは childId 決定後に読む）
   useEffect(() => {
     try {
       // week
@@ -88,57 +125,118 @@ export default function Page() {
       const initialWeek = savedWeek in weeks ? savedWeek : "week1";
       setWeek(initialWeek);
 
-      // history
-      const raw = localStorage.getItem(LS_HISTORY);
-      if (raw) {
-        try {
-          const arr = JSON.parse(raw) as any[];
-          setMessages(arr.map(ensureMsgShape));
-        } catch {
-          const opening = weeks[initialWeek].openingMessage;
-          setMessages([
-            {
-              id: newId(),
-              ts: new Date().toISOString(),
-              role: "assistant",
-              content: opening,
-            },
-          ]);
-        }
-      } else {
-        const opening = weeks[initialWeek].openingMessage;
-        setMessages([
-          {
-            id: newId(),
-            ts: new Date().toISOString(),
-            role: "assistant",
-            content: opening,
-          },
-        ]);
-      }
-
-      // profile
-      const p = JSON.parse(localStorage.getItem(LS_PROFILE) ?? "{}");
-      if (p?.grade) setGrade(p.grade as Grade);
-      if (p?.nickname) setNickname(p.nickname as string);
-
-      // childId: URL ?childId=... が最優先
-      const sp = new URLSearchParams(window.location.search);
-      const fromUrl = sp.get("childId") ?? "";
+      // childId: URL ?childId=... が最優先（※searchParams は別Effectで反映）
       const fromLs = localStorage.getItem(LS_CHILD_ID) ?? "";
-      const decided = (fromUrl || fromLs || "").trim();
-      setChildId(decided);
-      if (decided) localStorage.setItem(LS_CHILD_ID, decided);
+      setChildId((fromLs || "").trim());
     } finally {
       setMounted(true);
     }
   }, []);
 
-  // 永続化
+  // ★ childId が決まったら「その子のプロフィール」を読み込む（まず localStorage → 次に Supabase で上書き）
   useEffect(() => {
     if (!mounted) return;
-    localStorage.setItem(LS_HISTORY, JSON.stringify(messages));
-  }, [messages, mounted]);
+    const raw = localStorage.getItem(profileKey(childId)) ?? "{}";
+    try {
+      const p = JSON.parse(raw);
+      if (p?.grade) setGrade(p.grade as Grade);
+      if (p?.nickname) setNickname(p.nickname as string);
+      if (typeof p?.nicknameLocked === "boolean") setNicknameLocked(p.nicknameLocked);
+    } catch {
+      // ignore
+    }
+  }, [childId, mounted]);
+
+  // ★ Supabase（children）からプロフィールを補完：別端末でも同じニックネーム/学年になる
+  useEffect(() => {
+    if (!mounted || !childId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // ログインしていない場合はスキップ（ローカルのみ）
+        const token = await getAccessToken();
+        if (!token) return;
+
+        const { data, error } = await supabase
+          .from("children")
+          .select("name, grade")
+          .eq("id", childId)
+          .maybeSingle();
+
+        if (cancelled) return;
+        if (error) {
+          console.warn("[profile] children fetch error:", error.message);
+          return;
+        }
+
+        const dbGrade = (data as any)?.grade as Grade | null | undefined;
+        const dbName = (data as any)?.name as string | null | undefined;
+
+        if (dbGrade && grades.includes(dbGrade)) {
+          setGrade(dbGrade);
+        }
+
+        // すでに入力済みのニックネームがある場合は上書きしない（意図せず変わるのを防ぐ）
+        if (dbName && !nicknameRef.current?.trim()) {
+          setNickname(dbName);
+          setNicknameLocked(true);
+        }
+      } catch (e) {
+        console.warn("[profile] children fetch failed:", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [childId, mounted]);
+
+  // ★ URL の childId が変わったら、その子に切り替える（Guardian→トークで必須）
+  useEffect(() => {
+    if (!mounted) return;
+    const fromUrl = (searchParams?.get("childId") ?? "").trim();
+    if (!fromUrl) return;
+    setChildId(fromUrl);
+    localStorage.setItem(LS_CHILD_ID, fromUrl);
+  }, [searchParams, mounted]);
+
+  // ★ childId が決まったら「その子の履歴」を読み込む
+  useEffect(() => {
+    if (!mounted) return;
+
+    const key = historyKey(childId);
+    const raw = localStorage.getItem(key);
+
+    if (raw) {
+      try {
+        const arr = JSON.parse(raw) as any[];
+        setMessages(arr.map(ensureMsgShape));
+        return;
+      } catch {
+        // fallthrough
+      }
+    }
+
+    // 履歴が無い/壊れている場合は、その週の導入メッセージから開始
+    const opening = weeks[week].openingMessage;
+    const init: Msg[] = [
+      {
+        id: newId(),
+        ts: new Date().toISOString(),
+        role: "assistant",
+        content: opening,
+      },
+    ];
+    setMessages(init);
+    localStorage.setItem(key, JSON.stringify(init));
+  }, [childId, mounted]);
+
+  // 永続化（その子ごと）
+  useEffect(() => {
+    if (!mounted) return;
+    localStorage.setItem(historyKey(childId), JSON.stringify(messages));
+  }, [messages, mounted, childId]);
 
   // messagesRef を常に最新へ
   useEffect(() => {
@@ -146,13 +244,63 @@ export default function Page() {
   }, [messages]);
 
   useEffect(() => {
+    nicknameRef.current = nickname;
+  }, [nickname]);
+
+  useEffect(() => {
+    nicknameLockedRef.current = nicknameLocked;
+  }, [nicknameLocked]);
+
+  useEffect(() => {
     if (!mounted) return;
     const profile = {
       grade,
       nickname: nickname || undefined,
+      nicknameLocked,
     };
-    localStorage.setItem(LS_PROFILE, JSON.stringify(profile));
-  }, [grade, nickname, mounted]);
+    // ★ childId ごとに保存
+    localStorage.setItem(profileKey(childId), JSON.stringify(profile));
+  }, [grade, nickname, nicknameLocked, mounted, childId]);
+
+  // ★ プロフィール変更を Supabase にも保存（入力のたびに叩かず、少し待ってまとめて保存）
+  const saveProfileTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!mounted || !childId) return;
+
+    // ログインしていないなら Supabase 保存はスキップ（ローカルのみ）
+    // ※ getAccessToken は内部で session を見るので軽い
+    if (saveProfileTimer.current) window.clearTimeout(saveProfileTimer.current);
+
+    saveProfileTimer.current = window.setTimeout(async () => {
+      try {
+        const token = await getAccessToken();
+        if (!token) return;
+
+        const patch: any = {};
+
+        // 学年は children.grade に保存
+        if (grade) patch.grade = grade;
+
+        // ニックネームは children.name に保存（今回は name をニックネームとして扱う）
+        const nm = (nickname || "").trim();
+        if (nm) patch.name = nm;
+
+        // 何も変更がなければスキップ
+        if (Object.keys(patch).length === 0) return;
+
+        const { error } = await supabase.from("children").update(patch).eq("id", childId);
+        if (error) {
+          console.warn("[profile] children update error:", error.message);
+        }
+      } catch (e) {
+        console.warn("[profile] children update failed:", e);
+      }
+    }, 700);
+
+    return () => {
+      if (saveProfileTimer.current) window.clearTimeout(saveProfileTimer.current);
+    };
+  }, [grade, nickname, mounted, childId]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -170,11 +318,30 @@ export default function Page() {
       nickname: nickname || undefined,
     }),
     [grade, nickname]
-  );
+  ); // profileForApi
 
   async function send() {
     if (!input.trim() || isSending.current) return;
     isSending.current = true;
+
+    // ★ 自動ニックネーム取得は「ニックネームを教えてね」の直後だけ
+    const lastA = [...messagesRef.current].reverse().find((m) => m.role === "assistant");
+    if (!nicknameLocked && !nickname && lastA && isNicknamePrompt(lastA.content)) {
+      const extracted = extractNicknameFromNicknameAnswer(input);
+      if (extracted) {
+        setNickname(extracted);
+        setNicknameLocked(true);
+      }
+    }
+
+    // この送信でAIに渡すニックネームは、今回抽出できたらそれを最優先（setStateは非同期なので）
+    const nicknameForThisSend = ((): string | undefined => {
+      if (!nicknameLocked && !nickname && lastA && isNicknamePrompt(lastA.content)) {
+        const extracted = extractNicknameFromNicknameAnswer(input);
+        if (extracted) return extracted;
+      }
+      return nickname || undefined;
+    })();
 
     const me: Msg = {
       id: newId(),
@@ -182,6 +349,8 @@ export default function Page() {
       role: "user",
       content: input.trim(),
     };
+
+  
 
     // ★ ここで最新の messages から next を作る（stale state 対策）
     const nextForUi = [...messagesRef.current, me];
@@ -200,7 +369,10 @@ export default function Page() {
             role,
             content,
           })),
-          profile: profileForApi,
+          profile: {
+            grade,
+            nickname: nicknameForThisSend,
+          },
         }),
       });
 
@@ -258,7 +430,7 @@ export default function Page() {
       },
     ];
     setMessages(init);
-    if (mounted) localStorage.setItem(LS_HISTORY, JSON.stringify(init));
+    if (mounted) localStorage.setItem(historyKey(childId), JSON.stringify(init));
   }
 
   function handleResetClick() {
@@ -276,16 +448,29 @@ export default function Page() {
   async function endConversation() {
     if (!window.confirm("会話を終了して、きろくを保存するよ。いいかな？")) return;
 
-    // childId が空なら、保存はスキップ（デプロイ確認中の事故防止）
+    // childId が空なら、保存はスキップ（Guardian経由で開始してね）
     if (!childId) {
       alert(
-        "childId が未設定のため、保存をスキップしました。\n（本番では保護者画面→子ども選択→childId自動付与にします）"
+       "このトークは子どもが未選択のため保存できません。\n\n" +
+
+          "保護者マイページ（/guardian）で子どもを選んで『あい先生と話す』から開始してください。"
       );
       return;
     }
 
+    // まずローカル履歴は確実に保存（リロードしても消えない）
     try {
-      const token = getSupabaseAccessTokenFromLocalStorage();
+      localStorage.setItem(
+        historyKey(childId),
+        JSON.stringify(messagesRef.current)
+      );
+    } catch {
+      // ignore
+    }
+
+    try {
+      const token = await getAccessToken();
+      console.log("access_token length:", token.length);
 
       const res = await fetch("/api/save-session", {
         method: "POST",
@@ -296,23 +481,38 @@ export default function Page() {
         body: JSON.stringify({
           childId,
           week,
-          // DBには軽量に：role/text だけ送る（あなたの save-session 仕様に合わせてOK）
-          messages: messagesRef.current.map(({ role, content }) => ({
-            role,
-            text: content,
-          })),
+          accessToken: token,
+          messages: messagesRef.current.map(({ role, content }) => ({ role, content })),
+
+         
         }),
       });
 
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({} as any));
       if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error ?? "save-session failed");
+        if (res.status === 401) {
+          alert(
+            "保存にはログインが必要です。\n\n" +
+              "保護者ページでログインしてから、もう一度お試しください。"
+          );
+          return;
+        }
+        // ここでは throw せず、ユーザー向けに安全に表示
+        alert(
+          "保存に失敗しました。\n\n" +
+            (data?.error ?? `save-session failed (status=${res.status})`)
+        );
+        return;
       }
 
-      alert("保存しました！保護者マイページで確認できます。");
+      alert("保存しました！保護者マイページに戻ります。");
+      router.push("/guardian");
     } catch (e) {
-      console.error(e);
-      alert("保存に失敗しました。Vercel Logs と Supabase を確認してね。");
+      alert(
+        "保存に失敗しました。\n\n" +
+          "詳細: " + (e instanceof Error ? e.message : String(e))
+      );
+      console.error("save-session failed", e);
     }
   }
 
@@ -634,7 +834,12 @@ export default function Page() {
             <input
               style={inputStyle}
               value={nickname}
-              onChange={(e) => setNickname(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setNickname(v);
+                // 手入力が最優先：入力がある間はロック、空に戻したら再自動取得OK
+                setNicknameLocked(Boolean(v.trim()));
+              }}
               placeholder="たろう など"
             />
           </label>
@@ -731,14 +936,13 @@ export default function Page() {
             style={{
               ...sendButton,
               opacity: input.trim() ? 1 : 0.5,
-              pointerEvents: input.trim() ? "auto" : "none",
+                            pointerEvents: input.trim() ? "auto" : "none",
             }}
             onClick={send}
           >
             送信
           </button>
 
-          {/* ★ フッターにも会話終了（最強に見つかる） */}
           <button type="button" style={endFooterButton} onClick={endConversation}>
             会話終了
           </button>
@@ -747,3 +951,4 @@ export default function Page() {
     </div>
   );
 }
+

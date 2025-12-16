@@ -1,3 +1,5 @@
+// lib/supabaseClient.ts
+import "client-only";
 import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -28,6 +30,9 @@ export const supabase = (() => {
 // ★ トークン取得（save-session に Authorization: Bearer を付けたいときに使う）
 // - 取れない場合は "" を返す
 export async function getAccessToken(): Promise<string> {
+  // ★ Supabase未設定なら絶対に取れないので即return（ダミークライアント誤動作防止）
+  if (!supabaseUrl || !supabaseAnonKey) return "";
+
   try {
     const { data } = await supabase.auth.getSession();
     return data.session?.access_token ?? "";

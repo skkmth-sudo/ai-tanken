@@ -42,15 +42,30 @@ export async function POST(req: Request) {
     const cfg = getWeekConfig(week);
 
     const profileLines: string[] = [];
+    const nickname = (profile?.nickname ?? "").trim();
+
     if (profile?.grade) profileLines.push(`- 学年: ${profile.grade}`);
-    if (profile?.nickname) profileLines.push(`- ニックネーム: ${profile.nickname}`);
+    if (nickname) profileLines.push(`- ニックネーム: ${nickname}`);
     if (profile?.interests?.length) {
       profileLines.push(`- 興味のあること: ${profile.interests.join("、")}`);
     }
 
+    // ★ ニックネーム呼びかけ頻度：毎回は避けて「定期的に」
+    const nicknameRule = nickname
+      ? `
+
+【呼びかけ方】
+- ニックネーム「${nickname}」は毎回は使わない。自然なタイミングで時々（目安：3〜5回に1回、または話題転換・褒める・まとめ・注意喚起のとき）呼ぶ。
+- 呼びかけが不自然なときは省略してよい。`
+      : "";
+
     const systemText =
       cfg.systemPrompt +
-      (profileLines.length ? `\n\n【こどもの情報】\n${profileLines.join("\n")}` : "");
+      (profileLines.length ? `
+
+【こどもの情報】
+${profileLines.join("\\n")}` : "") +
+      nicknameRule;
 
     const openaiMessages = [
       { role: "system" as const, content: systemText },

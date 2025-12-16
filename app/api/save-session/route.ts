@@ -4,7 +4,6 @@ import { createClient } from "@supabase/supabase-js";
 
 type MsgIn = {
   role: "user" | "assistant";
-  // クライアント側の送信揺れ（content/text）に対応
   content?: string;
   text?: string;
 };
@@ -13,12 +12,14 @@ type Body = {
   childId: string;
   week?: string;
   messages: MsgIn[];
+  // Authorization ヘッダが環境要因で落ちるケースの保険
+  accessToken?: string;
 };
 
 function getBearerToken(req: Request) {
   const h = req.headers.get("authorization") || req.headers.get("Authorization");
   if (!h) return "";
-  const m = h.match(/^Bearer\\s+(.+)$/i);
+  const m = h.match(/^Bearer\s+(.+)$/i);
   return m?.[1]?.trim() ?? "";
 }
 
@@ -31,106 +32,143 @@ export async function POST(req: Request) {
     const week = (body.week ?? "").trim();
 
     if (!childId) {
-      return NextResponse.json(
-        { ok: false, error: "childId がありません" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "childId がありません" }, { status: 400 });
+    }
+    if (messages.length === 0) {
+      return NextResponse.json({ ok: false, error: "messages が空です" }, { status: 400 });
     }
 
-    const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (!url || !serviceKey) {
+    // ★ RLSを効かせるため、service_role ではなく anon + Bearer token で実行する
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!url || !anonKey) {
       return NextResponse.json(
-        { ok: false, error: "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY が未設定です" },
+        { ok: false, error: "NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY が未設定です" },
         { status: 500 }
       );
     }
-
-    const supabaseAdmin = createClient(url, serviceKey);
-
-    // --- 本番の不正防止：親のログイン情報を確認 ---
-    // Guardian→トーク→保存 の導線が出来てきたので、ここで改ざんを弾く。
-    // 仕組み：Authorization: Bearer <access_token> が来たら、そのユーザーに紐づく childId か検証。
-    // ※ まだトーク画面からトークンを送っていない場合、開発中は通す（本番では弾く）。
-    const token = getBearerToken(req);
-    const isProd = process.env.NODE_ENV === "production";
-
+    const token = (getBearerToken(req) || (body as any)?.accessToken || "").trim();
     if (!token) {
-      if (isProd) {
-        return NextResponse.json(
-          { ok: false, error: "認証トークンがありません（Bearer token 必須）" },
-          { status: 401 }
-        );
+      return NextResponse.json(
+        { ok: false, error: "認証トークンがありません（Bearer token 必須）" },
+        { status: 401 }
+      );
+    }
+
+    const supabase = createClient(url, anonKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+      global: {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    });
+
+    // 1) authユーザー取得（この token の本人）
+    // - supabase-js のバージョン差で getUser(token) / getUser() の挙動が揺れることがあるため両対応
+    console.log("[save-session] tokenLen=", token.length);
+
+    let uid = "";
+    {
+      const authAny = (supabase as any).auth;
+      let userData: any = null;
+      let userErr: any = null;
+
+      // まず getUser(token)
+      try {
+        const r = await authAny.getUser(token);
+        userData = r?.data;
+        userErr = r?.error;
+      } catch (e) {
+        userErr = e;
       }
-      // 開発中は一旦スルー（※本番前に必ずトークン送信へ移行）
-    } else {
-      const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-      const uid = userData?.user?.id ?? "";
+
+      // ダメなら getUser()（global Authorization を使う）
+      if (userErr || !userData?.user?.id) {
+        try {
+          const r2 = await authAny.getUser();
+          userData = r2?.data;
+          userErr = r2?.error;
+        } catch (e) {
+          userErr = e;
+        }
+      }
+
+      uid = userData?.user?.id ?? "";
       if (userErr || !uid) {
+        const msg = userErr?.message ?? String(userErr ?? "invalid token");
         return NextResponse.json(
-          { ok: false, error: "認証に失敗しました" },
+          { ok: false, error: `認証に失敗しました: ${msg}` },
           { status: 401 }
         );
       }
+    }
 
-      // 1) parent テーブルに user_id（= auth.users.id）を持っている想定
-      let parentId: string | null = null;
-      const { data: parentRow } = await supabaseAdmin
-        .from("parent")
-        .select("id")
-        .eq("user_id", uid)
-        .maybeSingle();
-      parentId = (parentRow as any)?.id ?? null;
+    // 2) parent特定
+    const { data: parentRow, error: parentErr } = await supabase
+      .from("parent")
+      .select("id")
+      .eq("user_id", uid)
+      .maybeSingle();
 
-      // 2) childId がその parent に紐づくかチェック
-      //    children.parent_id が parent.id の場合と、直接 uid を持つ場合の両方にフォールバック。
-      let allowed = false;
-      if (parentId) {
-        const { data: childRow } = await supabaseAdmin
-          .from("children")
-          .select("id")
-          .eq("id", childId)
-          .eq("parent_id", parentId)
-          .maybeSingle();
-        allowed = !!(childRow as any)?.id;
-      }
-      if (!allowed) {
-        const { data: childRow2 } = await supabaseAdmin
-          .from("children")
-          .select("id")
-          .eq("id", childId)
-          .eq("parent_id", uid)
-          .maybeSingle();
-        allowed = !!(childRow2 as any)?.id;
-      }
+    if (parentErr) {
+      return NextResponse.json({ ok: false, error: parentErr.message }, { status: 500 });
+    }
 
-      if (!allowed) {
-        return NextResponse.json(
-          { ok: false, error: "この childId はこのユーザーに紐づいていません" },
-          { status: 403 }
-        );
-      }
+    const parentId = (parentRow as any)?.id ?? null;
+    if (!parentId) {
+      return NextResponse.json(
+        { ok: false, error: "parent レコードが見つかりません" },
+        { status: 403 }
+      );
+    }
+
+    // 3) childId がその parent に紐づくか
+    const { data: childRow, error: childErr } = await supabase
+      .from("children")
+      .select("id")
+      .eq("id", childId)
+      .eq("parent_id", parentId)
+      .maybeSingle();
+
+    if (childErr) {
+      return NextResponse.json({ ok: false, error: childErr.message }, { status: 500 });
+    }
+    if (!(childRow as any)?.id) {
+      return NextResponse.json(
+        { ok: false, error: "この childId はこのユーザーに紐づいていません" },
+        { status: 403 }
+      );
     }
 
     // guardian 側が期待している形：[{ role, text }]
     const mapped = messages
+      .slice(-120)
       .map((m) => ({
         role: m.role === "user" ? "user" : "assistant",
         text: String((m.text ?? m.content ?? "") as string),
       }))
       .filter((m) => m.text.trim().length > 0);
 
-    const insertPayload: any = {
+    if (mapped.length === 0) {
+      return NextResponse.json({ ok: false, error: "有効な messages がありません" }, { status: 400 });
+    }
+
+    const payload: any = {
+      parent_id: parentId,
       child_id: childId,
       messages: mapped,
     };
-    if (week) insertPayload.week = week;
+    if (week) payload.week = week;
 
-    const { error } = await supabaseAdmin.from("chat_sessions").insert([insertPayload]);
+    const { error: insertErr } = await supabase.from("chat_sessions").insert([payload]);
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    if (insertErr) {
+      return NextResponse.json({ ok: false, error: insertErr.message }, { status: 500 });
     }
 
     return NextResponse.json({ ok: true });
