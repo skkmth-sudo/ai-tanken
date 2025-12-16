@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 
 type ChatMessage = {
   role: "user" | "assistant";
+  // DBには content で保存されていることもあるので、表示側は text を最終形として扱う
   text: string;
 };
 
@@ -247,14 +248,20 @@ export default function GuardianPage() {
         sessionsMap[c.id] = (sessions ?? []).map((s: any) => ({
           id: s.id as string,
           startedAt: (s.created_at as string) ?? "",
-          messages: (s.messages as ChatMessage[]) ?? [],
+          messages: Array.isArray(s.messages)
+            ? (s.messages as any[]).map((m: any) => ({
+                role: m?.role === "user" ? "user" : "assistant",
+                // 互換: save-session は content で保存するので、text が無い場合は content を拾う
+                text: String(m?.text ?? m?.content ?? m?.message ?? ""),
+              }))
+            : [],
         }));
       }
 
       // 🔽 ここを修正（growth_points ＋ recentSessions も含める）
       const mapped: Child[] = children.map((c) => ({
         id: c.id as string,
-        name: (c.name as string) ?? "ななしさん",
+        name: ((c.nickname as string) ?? (c.name as string)) ?? "ななしさん",
         grade: (c.grade as string) ?? "",
         avatarLabel: (c.avatar_label as string) ?? "",
         favorites: Array.isArray(c.favorites)

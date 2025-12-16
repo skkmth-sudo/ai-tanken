@@ -37,12 +37,45 @@ function newId() {
   return "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
+function pickText(v: any): string {
+  if (typeof v === "string") return v;
+  if (v == null) return "";
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+
+  // 配列は連結
+  if (Array.isArray(v)) return v.map(pickText).join("");
+
+  if (typeof v === "object") {
+    // よくあるキー
+    const direct = v.content ?? v.text ?? v.message ?? v.msg ?? v.value;
+    if (direct !== undefined) return pickText(direct);
+
+    // OpenAI/各種フォーマットっぽい形も吸収
+    if (Array.isArray(v.parts)) return v.parts.map(pickText).join("");
+    if (Array.isArray(v.contents)) return v.contents.map(pickText).join("");
+    if (Array.isArray(v.messages)) return v.messages.map(pickText).join("");
+
+    // 最後の手段：オブジェクトの文字列化（[object Object]は避ける）
+    try {
+      const s = JSON.stringify(v);
+      return s && s !== "{}" ? s : "";
+    } catch {
+      return "";
+    }
+  }
+
+  return String(v);
+}
+
 function ensureMsgShape(m: any): Msg {
+  // 既存データ互換：content / text など、形が違っても「文章」を拾う
+  const raw = pickText(m?.content ?? m?.text ?? m?.message ?? m?.msg ?? (typeof m === "string" ? m : m));
+
   return {
     id: m?.id ?? newId(),
-    ts: m?.ts ?? new Date().toISOString(),
+    ts: m?.ts ?? m?.created_at ?? new Date().toISOString(),
     role: m?.role === "user" ? "user" : "assistant",
-    content: String(m?.content ?? ""),
+    content: String(raw ?? ""),
   };
 }
 
@@ -160,7 +193,7 @@ export default function Page() {
 
         const { data, error } = await supabase
           .from("children")
-          .select("name, grade")
+          .select("nickname, grade")
           .eq("id", childId)
           .maybeSingle();
 
@@ -171,15 +204,15 @@ export default function Page() {
         }
 
         const dbGrade = (data as any)?.grade as Grade | null | undefined;
-        const dbName = (data as any)?.name as string | null | undefined;
+        const dbNickname = (data as any)?.nickname as string | null | undefined;
 
         if (dbGrade && grades.includes(dbGrade)) {
           setGrade(dbGrade);
         }
 
         // すでに入力済みのニックネームがある場合は上書きしない（意図せず変わるのを防ぐ）
-        if (dbName && !nicknameRef.current?.trim()) {
-          setNickname(dbName);
+        if (dbNickname && !nicknameRef.current?.trim()) {
+          setNickname(dbNickname);
           setNicknameLocked(true);
         }
       } catch (e) {
@@ -232,6 +265,57 @@ export default function Page() {
     localStorage.setItem(key, JSON.stringify(init));
   }, [childId, mounted]);
 
+  // ★ ローカル履歴が「初期状態」なら、Supabaseの最新セッションから復元（白紙っぽさ対策）
+  useEffect(() => {
+    if (!mounted || !childId) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // 1) まずローカルが十分あるなら何もしない
+        const key = historyKey(childId);
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          const arr = JSON.parse(raw) as any[];
+          if (Array.isArray(arr) && arr.length >= 2) return; // 2件以上なら「続きがある」
+        }
+
+        // 2) ログインしてなければ復元できないので終了
+        const token = await getAccessToken();
+        if (!token) return;
+
+        // 3) Supabaseから最新の会話を取得
+        const { data, error } = await supabase
+          .from("chat_sessions")
+          .select("messages")
+          .eq("child_id", childId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (cancelled) return;
+        if (error) {
+          console.warn("[resume] chat_sessions fetch error:", error.message);
+          return;
+        }
+
+        const msgsRaw = (data as any)?.messages as any[] | undefined;
+        if (!Array.isArray(msgsRaw) || msgsRaw.length === 0) return;
+
+        const restored = msgsRaw.map(ensureMsgShape);
+        setMessages(restored);
+        localStorage.setItem(key, JSON.stringify(restored));
+      } catch (e) {
+        console.warn("[resume] restore failed:", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mounted, childId]);
+
   // 永続化（その子ごと）
   useEffect(() => {
     if (!mounted) return;
@@ -281,10 +365,9 @@ export default function Page() {
         // 学年は children.grade に保存
         if (grade) patch.grade = grade;
 
-        // ニックネームは children.name に保存（今回は name をニックネームとして扱う）
+        // ニックネームは children.nickname に保存（children.name は本名の表示用として残す）
         const nm = (nickname || "").trim();
-        if (nm) patch.name = nm;
-
+        if (nm) patch.nickname = nm;
         // 何も変更がなければスキップ
         if (Object.keys(patch).length === 0) return;
 
@@ -645,9 +728,10 @@ export default function Page() {
     border: "4px solid #4b5563",
     boxShadow: "6px 6px 0 rgba(0, 0, 0, 0.15)",
     padding: 20,
-    fontSize: 15,
+    fontSize: 20,
     lineHeight: 1.7,
     background: "#f9fafb",
+    color: "#111827",
   };
 
   // アイ先生（指定のサイズ・位置で固定）
@@ -670,7 +754,7 @@ export default function Page() {
     flexDirection: "column",
     height: "65vh",
     overflow: "hidden",
-    fontSize: 12,
+    fontSize: 14,
   };
   const historyHeader: CSSProperties = {
     fontWeight: 600,
