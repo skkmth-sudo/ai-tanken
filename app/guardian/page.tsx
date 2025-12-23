@@ -19,7 +19,8 @@ type ChatSession = {
 
 type Child = {
   id: string;
-  name: string;
+  name: string; // 本名（DB: children.name）
+  nickname?: string; // 呼び名（DB: children.nickname）
   grade: string;
   avatarLabel: string;
   favorites: string[];
@@ -155,6 +156,12 @@ export default function GuardianPage() {
   const [isLogOpen, setIsLogOpen] = useState(false);
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
 
+  // プロフィール編集モーダル
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [editNickname, setEditNickname] = useState("");
+  const [editGrade, setEditGrade] = useState("");
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+
   // 🔍 ログインチェック＋ parent / children / chat_sessions 読み込み
   useEffect(() => {
     const fetchParentAndChildren = async () => {
@@ -261,7 +268,8 @@ export default function GuardianPage() {
       // 🔽 ここを修正（growth_points ＋ recentSessions も含める）
       const mapped: Child[] = children.map((c) => ({
         id: c.id as string,
-        name: ((c.nickname as string) ?? (c.name as string)) ?? "ななしさん",
+        name: (c.name as string) ?? "ななしさん",
+        nickname: (c.nickname as string) ?? "",
         grade: (c.grade as string) ?? "",
         avatarLabel: (c.avatar_label as string) ?? "",
         favorites: Array.isArray(c.favorites)
@@ -286,9 +294,9 @@ export default function GuardianPage() {
 
       setChildrenFromDb(mapped);
 
-      // Supabase から子どもが取れたら、最初の1人を選択
+      // 既存選択を優先（なければ先頭）
       if (mapped.length > 0) {
-        setSelectedChildId(mapped[0].id);
+        setSelectedChildId((prev) => (mapped.some((c) => c.id === prev) ? prev : mapped[0].id));
       }
     };
 
@@ -309,6 +317,7 @@ export default function GuardianPage() {
     parent.children[0];
 
   const child = selectedChild;
+  const childDisplayName = (child.nickname?.trim() ? child.nickname : child.name) ?? "";
 
   // ログアウト動作
   const handleLogout = async () => {
@@ -331,6 +340,55 @@ export default function GuardianPage() {
 
   const handleCloseLog = () => {
     setIsLogOpen(false);
+  };
+
+  // ✅ プロフィール編集
+  const handleOpenProfile = () => {
+    setEditNickname(child?.nickname ?? "");
+    setEditGrade(child?.grade ?? "");
+    setIsProfileOpen(true);
+  };
+
+  const handleCloseProfile = () => {
+    setIsProfileOpen(false);
+  };
+
+  const handleSaveProfile = async () => {
+    if (!child?.id) return;
+
+    const nickname = editNickname.trim();
+    const grade = editGrade.trim();
+
+    try {
+      setIsSavingProfile(true);
+
+      const { error } = await supabase
+        .from("children")
+        .update({ nickname: nickname || null, grade })
+        .eq("id", child.id);
+
+      if (error) {
+        alert(`保存に失敗しました: ${error.message}`);
+        return;
+      }
+
+      // 画面即反映（現在の child を更新）
+      setChildrenFromDb((prev) =>
+        prev.map((c) =>
+          c.id === child.id
+            ? {
+                ...c,
+                nickname: nickname || "",
+                grade,
+              }
+            : c
+        )
+      );
+
+      setIsProfileOpen(false);
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   return (
@@ -370,7 +428,7 @@ export default function GuardianPage() {
             {parent.name}さん、{fallbackParent.greetingTime}。
           </div>
           <div style={{ fontSize: 13, lineHeight: 1.7, opacity: 0.92 }}>
-            今日も、{child.name}のことばの力を育てていきましょう。
+            今日も、{childDisplayName}のことばの力を育てていきましょう。
           </div>
         </div>
 
@@ -421,7 +479,7 @@ export default function GuardianPage() {
               >
                 {parent.children.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name}（{c.grade}）
+                    {(c.nickname?.trim() ? c.nickname : c.name)}（{c.grade}）
                   </option>
                 ))}
               </select>
@@ -442,7 +500,7 @@ export default function GuardianPage() {
                 <div className="profile-row">
                   <div className="avatar">{child.avatarLabel}</div>
                   <div>
-                    <div className="profile-name">{child.name}</div>
+                    <div className="profile-name">{childDisplayName}</div>
                     <div className="profile-grade">{child.grade}</div>
                   </div>
                 </div>
@@ -453,9 +511,19 @@ export default function GuardianPage() {
                   得意なこと：{child.strength}
                 </div>
                 <div style={{ marginTop: 8 }}>
-                  <span className="link-underline">
+                  <button
+                    type="button"
+                    className="link-underline"
+                    onClick={handleOpenProfile}
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      padding: 0,
+                      cursor: "pointer",
+                    }}
+                  >
                     プロフィールを確認・編集する
-                  </span>
+                  </button>
                 </div>
               </div>
             </article>
@@ -566,12 +634,9 @@ export default function GuardianPage() {
       {/* 🗨 会話ログモーダル */}
       {isLogOpen && (
         <div className="chat-modal-backdrop" onClick={handleCloseLog}>
-          <div
-            className="chat-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="chat-modal" onClick={(e) => e.stopPropagation()}>
             <div className="chat-modal-header">
-              <div className="chat-modal-title">{child.name} の会話ログ</div>
+              <div className="chat-modal-title">{childDisplayName} の会話ログ</div>
               <button
                 type="button"
                 className="chat-modal-close"
@@ -597,7 +662,7 @@ export default function GuardianPage() {
                     }
                   >
                     <div className="chat-bubble-role">
-                      {m.role === "user" ? child.name : "あい先生"}
+                      {m.role === "user" ? childDisplayName : "あい先生"}
                     </div>
                     <div className="chat-bubble-text">{m.text}</div>
                   </div>
@@ -607,6 +672,78 @@ export default function GuardianPage() {
                   Supabase に会話ログが追加されると、ここに表示されます。
                 </p>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 👤 プロフィール編集モーダル */}
+      {isProfileOpen && (
+        <div className="chat-modal-backdrop" onClick={handleCloseProfile}>
+          <div className="chat-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-modal-header">
+              <div className="chat-modal-title">プロフィール編集</div>
+              <button
+                type="button"
+                className="chat-modal-close"
+                onClick={handleCloseProfile}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="chat-modal-body">
+              <div style={{ display: "grid", gap: 12 }}>
+                <label style={{ display: "grid", gap: 6 }}>
+                  <span style={{ fontWeight: 800 }}>ニックネーム</span>
+                  <input
+                    value={editNickname}
+                    onChange={(e) => setEditNickname(e.target.value)}
+                    style={{
+                      padding: 10,
+                      borderRadius: 10,
+                      border: "1px solid rgba(0,0,0,0.15)",
+                      fontSize: 16,
+                    }}
+                    placeholder="例：たなか"
+                  />
+                </label>
+
+                <label style={{ display: "grid", gap: 6 }}>
+                  <span style={{ fontWeight: 800 }}>学年</span>
+                  <input
+                    value={editGrade}
+                    onChange={(e) => setEditGrade(e.target.value)}
+                    style={{
+                      padding: 10,
+                      borderRadius: 10,
+                      border: "1px solid rgba(0,0,0,0.15)",
+                      fontSize: 16,
+                    }}
+                    placeholder="例：小学3年生"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleSaveProfile}
+                  disabled={isSavingProfile}
+                  style={{
+                    marginTop: 8,
+                    padding: "12px 14px",
+                    borderRadius: 999,
+                    fontWeight: 900,
+                    border: "none",
+                    background: "rgba(255,255,255,0.9)",
+                    color: "#6b4a2b",
+                    boxShadow: "0 10px 24px rgba(0,0,0,0.18)",
+                    cursor: isSavingProfile ? "not-allowed" : "pointer",
+                    opacity: isSavingProfile ? 0.7 : 1,
+                  }}
+                >
+                  {isSavingProfile ? "保存中…" : "保存する"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
