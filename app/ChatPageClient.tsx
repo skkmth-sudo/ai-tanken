@@ -133,6 +133,9 @@ export default function Page() {
   // ★ 自動取得は「最初のニックネーム質問に答えた時だけ」
   const [nicknameLocked, setNicknameLocked] = useState(false);
 
+  // ★ DBのプロフィールを一度は確認してから（デフォ値で）上書き保存しないためのフラグ
+  const [dbProfileChecked, setDbProfileChecked] = useState(false);
+
   const [showProfile, setShowProfile] = useState(false);
 
   // ★ 最新の nickname/lock を参照するための ref（非同期処理でのズレ防止）
@@ -169,6 +172,9 @@ export default function Page() {
   // ★ childId が決まったら「その子のプロフィール」を読み込む（まず localStorage → 次に Supabase で上書き）
   useEffect(() => {
     if (!mounted) return;
+    // child 切替時は、DBチェックをやり直す
+    setDbProfileChecked(false);
+
     const raw = localStorage.getItem(profileKey(childId)) ?? "{}";
     try {
       const p = JSON.parse(raw);
@@ -189,7 +195,10 @@ export default function Page() {
       try {
         // ログインしていない場合はスキップ（ローカルのみ）
         const token = await getAccessToken();
-        if (!token) return;
+        if (!token) {
+          if (!cancelled) setDbProfileChecked(true);
+          return;
+        }
 
         const { data, error } = await supabase
           .from("children")
@@ -210,13 +219,17 @@ export default function Page() {
           setGrade(dbGrade);
         }
 
-        // すでに入力済みのニックネームがある場合は上書きしない（意図せず変わるのを防ぐ）
-        if (dbNickname && !nicknameRef.current?.trim()) {
-          setNickname(dbNickname);
-          setNicknameLocked(true);
+        // ✅ Guardian（DB）を基本の正とし、値が違えば上書き（空なら空で反映＝クリアもできる）
+        const incoming = (dbNickname ?? "").trim();
+        const current = (nicknameRef.current ?? "").trim();
+        if (incoming !== current) {
+          setNickname(dbNickname ?? "");
+          setNicknameLocked(Boolean(incoming));
         }
       } catch (e) {
         console.warn("[profile] children fetch failed:", e);
+      } finally {
+        if (!cancelled) setDbProfileChecked(true);
       }
     })();
 
@@ -347,9 +360,11 @@ export default function Page() {
   }, [grade, nickname, nicknameLocked, mounted, childId]);
 
   // ★ プロフィール変更を Supabase にも保存（入力のたびに叩かず、少し待ってまとめて保存）
+  // ※ dbProfileChecked 前にデフォ値で上書きしない
   const saveProfileTimer = useRef<number | null>(null);
   useEffect(() => {
     if (!mounted || !childId) return;
+    if (!dbProfileChecked) return;
 
     // ログインしていないなら Supabase 保存はスキップ（ローカルのみ）
     // ※ getAccessToken は内部で session を見るので軽い
@@ -367,7 +382,8 @@ export default function Page() {
 
         // ニックネームは children.nickname に保存（children.name は本名の表示用として残す）
         const nm = (nickname || "").trim();
-        if (nm) patch.nickname = nm;
+        // ✅ 空なら null を入れてクリアできるようにする（ただし dbProfileChecked 後なので安全）
+        patch.nickname = nm || null;
         // 何も変更がなければスキップ
         if (Object.keys(patch).length === 0) return;
 
@@ -383,7 +399,7 @@ export default function Page() {
     return () => {
       if (saveProfileTimer.current) window.clearTimeout(saveProfileTimer.current);
     };
-  }, [grade, nickname, mounted, childId]);
+  }, [grade, nickname, mounted, childId, dbProfileChecked]);
 
   useEffect(() => {
     if (!mounted) return;
