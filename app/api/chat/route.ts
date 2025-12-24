@@ -55,7 +55,7 @@ export async function POST(req: Request) {
       ? `
 
 【呼びかけ方】
-- ニックネーム「${nickname}」は毎回は使わない。自然なタイミングで時々（目安：3〜5回に1回、または話題転換・褒める・まとめ・注意喚起のとき）呼ぶ。
+- ニックネーム「${nickname}」は毎回は使わない。自然なタイミングで“定期的に”（目安：2〜4回に1回、または話題転換・褒める・まとめ・確認・注意喚起のとき）呼ぶ。
 - 呼びかけが不自然なときは省略してよい。`
       : "";
 
@@ -83,9 +83,23 @@ ${profileLines.join("\\n")}` : "") +
       max_tokens: 400,
     });
 
-    const reply =
+    let reply =
       resp.choices[0]?.message?.content?.trim() ??
       "エラーが起きたみたい。もう一度ためしてみてね。";
+
+    // ✅ “定期的に名前で呼ぶ”を確実にする（モデルが指示を無視した時の保険）
+    // - 目安：ユーザー発話 3回ごと（2〜4回に1回の範囲に収まる）
+    // - すでにニックネームを含む／不自然なときは何もしない
+    if (nickname) {
+      const userTurns = (messages ?? []).filter((m) => m.role === "user").length;
+      const shouldCall = userTurns > 0 && userTurns % 3 === 0;
+      const alreadyCalled = reply.includes(nickname);
+      const tooShort = reply.length < 8;
+
+      if (shouldCall && !alreadyCalled && !tooShort) {
+        reply = `${nickname}、${reply}`;
+      }
+    }
 
     return NextResponse.json({ ok: true, reply });
   } catch (err) {

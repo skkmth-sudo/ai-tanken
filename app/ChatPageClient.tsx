@@ -224,7 +224,9 @@ export default function Page() {
         const current = (nicknameRef.current ?? "").trim();
         if (incoming !== current) {
           setNickname(dbNickname ?? "");
-          setNicknameLocked(Boolean(incoming));
+          // ✅ DBのニックネームは「初期値」として反映するだけ。
+          // 会話中の「ニックネームを教えてね」への回答で更新できるよう、ここでは lock しない。
+          setNicknameLocked((prev) => prev);
         }
       } catch (e) {
         console.warn("[profile] children fetch failed:", e);
@@ -425,7 +427,9 @@ export default function Page() {
 
     // ★ 自動ニックネーム取得は「ニックネームを教えてね」の直後だけ
     const lastA = [...messagesRef.current].reverse().find((m) => m.role === "assistant");
-    if (!nicknameLocked && !nickname && lastA && isNicknamePrompt(lastA.content)) {
+    // ✅ 既にプロフィールにニックネームが入っていても、
+    // 「ニックネームを教えてね」への回答なら上書きできるようにする
+    if (lastA && isNicknamePrompt(lastA.content)) {
       const extracted = extractNicknameFromNicknameAnswer(input);
       if (extracted) {
         setNickname(extracted);
@@ -435,7 +439,7 @@ export default function Page() {
 
     // この送信でAIに渡すニックネームは、今回抽出できたらそれを最優先（setStateは非同期なので）
     const nicknameForThisSend = ((): string | undefined => {
-      if (!nicknameLocked && !nickname && lastA && isNicknamePrompt(lastA.content)) {
+      if (lastA && isNicknamePrompt(lastA.content)) {
         const extracted = extractNicknameFromNicknameAnswer(input);
         if (extracted) return extracted;
       }
