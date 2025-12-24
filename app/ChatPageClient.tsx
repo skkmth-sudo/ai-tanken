@@ -584,7 +584,6 @@ export default function Page() {
         body: JSON.stringify({
           childId,
           week,
-          accessToken: token,
           messages: messagesRef.current.map(({ role, content }) => ({ role, content })),
 
          

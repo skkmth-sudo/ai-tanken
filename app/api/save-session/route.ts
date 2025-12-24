@@ -12,8 +12,6 @@ type Body = {
   childId: string;
   week?: string;
   messages: MsgIn[];
-  // Authorization ヘッダが環境要因で落ちるケースの保険
-  accessToken?: string;
 };
 
 function getBearerToken(req: Request) {
@@ -47,10 +45,10 @@ export async function POST(req: Request) {
         { status: 500 }
       );
     }
-    const token = (getBearerToken(req) || (body as any)?.accessToken || "").trim();
+    const token = (getBearerToken(req) || "").trim();
     if (!token) {
       return NextResponse.json(
-        { ok: false, error: "認証トークンがありません（Bearer token 必須）" },
+        { ok: false, error: "認証トークンがありません（Authorization: Bearer <token> が必須です）" },
         { status: 401 }
       );
     }
