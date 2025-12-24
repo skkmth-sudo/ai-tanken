@@ -1,3 +1,7 @@
+// FILE: app/ChatPageClient.tsx
+
+// ここに「ファイル全文」を貼り付けて編集します。
+//（部分コピペ禁止：必ず全文を置き換え）
 
 
 "use client";
@@ -120,6 +124,14 @@ function isNicknamePrompt(text: string): boolean {
   return /ニックネーム/.test(t) && /(教えて|おしえて|呼んでもいい|呼び方)/.test(t);
 }
 
+// ★ URL/LS から受け取る childId を安全に整形（混入URLで迷子にならない）
+function normalizeChildId(raw: string): string {
+  const t = (raw ?? "").trim();
+  if (!t) return "";
+  // ありがちな混入（"haru/guardian/login" など）を弾く
+  if (t.includes("/") || t.includes(" ") || t.includes("?")) return "";
+  return t;
+}
 
 export default function ChatPageClient() {
 
@@ -143,9 +155,15 @@ export default function ChatPageClient() {
   const nicknameRef = useRef("");
   const nicknameLockedRef = useRef(false);
 
+  // ★ 最新の childId を参照するための ref（debounce 発火後の async が残っても別の子に書かない）
+  const childIdRef = useRef("");
+
 
   // ★ childId は「URL→localStorage→空」の順で決める（入力欄は出さない）
   const [childId, setChildId] = useState<string>("");
+
+  // ★ 迷子防止のリダイレクトを二重実行しない
+  const didRedirectRef = useRef(false);
 
   const isSending = useRef(false);
   const [input, setInput] = useState("");
@@ -163,8 +181,8 @@ export default function ChatPageClient() {
       setWeek(initialWeek);
 
       // childId: URL ?childId=... が最優先（※searchParams は別Effectで反映）
-      const fromLs = localStorage.getItem(LS_CHILD_ID) ?? "";
-      setChildId((fromLs || "").trim());
+            const fromLs = normalizeChildId(localStorage.getItem(LS_CHILD_ID) ?? "");
+      setChildId(fromLs);
     } finally {
       setMounted(true);
     }
@@ -240,15 +258,45 @@ export default function ChatPageClient() {
       cancelled = true;
     };
   }, [childId, mounted]);
-
-  // ★ URL の childId が変わったら、その子に切り替える（Guardian→トークで必須）
+  // ★ URL から childId を受け取る（Guardian→トークの正規導線）
   useEffect(() => {
     if (!mounted) return;
-    const fromUrl = (searchParams?.get("childId") ?? "").trim();
+
+    const fromUrl = normalizeChildId(searchParams?.get("childId") ?? "");
     if (!fromUrl) return;
+
+    // 既に同じ childId なら何もしない
+    if (fromUrl === childId) return;
+
     setChildId(fromUrl);
     localStorage.setItem(LS_CHILD_ID, fromUrl);
-  }, [searchParams, mounted]);
+  }, [searchParams, mounted, childId]);
+
+  // ★ chat画面：childId が無い/不正なら guardian へ戻す（迷子防止）
+  useEffect(() => {
+    if (!mounted) return;
+    if (didRedirectRef.current) return;
+
+    const raw = searchParams?.get("childId") ?? "";
+    const normalized = normalizeChildId(raw);
+
+    // URLに childId が“変な形で”混ざってるなら、まず guardian に誘導
+    if (raw && !normalized) {
+      didRedirectRef.current = true;
+      alert("リンクが正しくないみたい。保護者ページから子どもを選んで入り直してね。");
+      router.replace("/guardian");
+      return;
+    }
+
+    // URLから正しい childId が来ているのに、まだ state に反映されていない間は待つ
+    if (normalized && !childId) return;
+
+    // childId が最終的に空なら guardian に誘導
+    if (!childId) {
+      didRedirectRef.current = true;
+      router.replace("/guardian");
+    }
+  }, [mounted, childId, router, searchParams]);
 
   // ★ childId が決まったら「その子の履歴」を読み込む
   useEffect(() => {
@@ -373,6 +421,9 @@ export default function ChatPageClient() {
     // ※ getAccessToken は内部で session を見るので軽い
     if (saveProfileTimer.current) window.clearTimeout(saveProfileTimer.current);
 
+    // ★ debounce 発火時点の childId を保持し、async 実行中に child が切り替わったら中断する
+    const scheduledChildId = childId;
+
     saveProfileTimer.current = window.setTimeout(async () => {
       try {
         const token = await getAccessToken();
@@ -390,7 +441,16 @@ export default function ChatPageClient() {
         // 何も変更がなければスキップ
         if (Object.keys(patch).length === 0) return;
 
-        const { error } = await supabase.from("children").update(patch).eq("id", childId);
+                // ✅ 発火後に child が切り替わっていたら中断（理論上の伝染をゼロ化）
+        if ((childIdRef.current || "").trim() !== (scheduledChildId || "").trim()) {
+          console.warn("[profile] stale update canceled (child changed)", {
+            scheduledChildId,
+            currentChildId: childIdRef.current,
+          });
+          return;
+        }
+
+        const { error } = await supabase.from("children").update(patch).eq("id", scheduledChildId);
         if (error) {
           console.warn("[profile] children update error:", error.message);
         }
@@ -414,6 +474,11 @@ export default function ChatPageClient() {
     if (childId) localStorage.setItem(LS_CHILD_ID, childId);
   }, [childId, mounted]);
 
+  // ★ childIdRef を常に最新へ（debounce 発火後に child が切り替わったら更新を中断するため）
+  useEffect(() => {
+    childIdRef.current = childId;
+  }, [childId]);
+
   const profileForApi = useMemo(
     () => ({
       grade,
@@ -421,6 +486,10 @@ export default function ChatPageClient() {
     }),
     [grade, nickname]
   ); // profileForApi
+
+  // ★ 重さ対策：右ペインの表示は最新N件だけ（保存は全件のまま）
+  const HISTORY_UI_LIMIT = 80;
+  const uiMessages = useMemo(() => messages.slice(-HISTORY_UI_LIMIT), [messages]);
 
   async function send() {
     if (!input.trim() || isSending.current) return;
@@ -1018,7 +1087,7 @@ export default function ChatPageClient() {
             </div>
 
             <div style={historyList}>
-              {messages.map((m) => {
+              {uiMessages.map((m) => {
                 const isUser = m.role === "user";
                 const bubbleStyle: CSSProperties = {
                   ...historyBubbleBase,

@@ -15,6 +15,44 @@ type Body = {
   messages: MsgIn[];
 };
 
+// ------------------------------
+// Validation / normalization
+// ------------------------------
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WEEK_RE = /^week([1-9]|10)$/i;
+
+const MAX_MESSAGES_IN_REQUEST = 2000; // まずは過剰サイズを弾く
+const MAX_MESSAGES_TO_STORE = 120; // DBに保存する最大（現状の実装と合わせる）
+const MAX_CONTENT_LEN = 2000;
+
+function isUuid(v: unknown): v is string {
+  return typeof v === "string" && UUID_RE.test(v.trim());
+}
+
+function normalizeWeek(v: unknown): string {
+  const t = typeof v === "string" ? v.trim() : "";
+  if (!t) return "";
+  return WEEK_RE.test(t) ? t.toLowerCase() : "";
+}
+
+function pickContent(m: MsgIn): string {
+  const raw = m.content ?? m.text ?? "";
+  const s = typeof raw === "string" ? raw : String(raw);
+  return s.trim();
+}
+
+function normalizeTs(v: unknown): string {
+  const t = typeof v === "string" ? v.trim() : "";
+  if (!t) return new Date().toISOString();
+  // Date.parse が通る程度でOK（厳密ISOまで求めない）
+  const ms = Date.parse(t);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : new Date().toISOString();
+}
+
+function badRequest(msg: string) {
+  return NextResponse.json({ ok: false, error: msg }, { status: 400 });
+}
+
 function getBearerToken(req: Request) {
   const h = req.headers.get("authorization") || req.headers.get("Authorization");
   if (!h) return "";
@@ -24,18 +62,30 @@ function getBearerToken(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as Body;
+    const body = (await req.json()) as Partial<Body>;
 
-    const childId = (body.childId ?? "").trim();
-    const messages = Array.isArray(body.messages) ? body.messages : [];
-    const week = (body.week ?? "").trim();
+    const childIdRaw = typeof body?.childId === "string" ? body.childId.trim() : "";
+    const weekRaw = body?.week;
+    const messagesRaw = Array.isArray(body?.messages) ? body.messages : [];
 
-    if (!childId) {
-      return NextResponse.json({ ok: false, error: "childId がありません" }, { status: 400 });
+    if (!isUuid(childIdRaw)) {
+      return badRequest("childId が不正です");
     }
-    if (messages.length === 0) {
-      return NextResponse.json({ ok: false, error: "messages が空です" }, { status: 400 });
+    if (messagesRaw.length === 0) {
+      return badRequest("messages が空です");
     }
+    if (messagesRaw.length > MAX_MESSAGES_IN_REQUEST) {
+      return badRequest("messages が多すぎます");
+    }
+
+    const week = normalizeWeek(weekRaw);
+    // week が指定されているのに不正なら 400
+    if (typeof weekRaw === "string" && weekRaw.trim() && !week) {
+      return badRequest("week が不正です");
+    }
+
+    const childId = childIdRaw;
+    const messages = messagesRaw;
 
     // ★ RLSを効かせるため、service_role ではなく anon + Bearer token で実行する
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -146,18 +196,25 @@ export async function POST(req: Request) {
 
     // ✅ 保存形式を { role, content, ts } に統一（互換のため text も残す）
     const mapped = messages
-      .slice(-120)
+      .slice(-MAX_MESSAGES_TO_STORE)
       .map((m) => {
-        const content = String(m.content ?? m.text ?? "");
-        const ts = String(m.ts ?? new Date().toISOString());
+        const role = m?.role === "user" ? "user" : m?.role === "assistant" ? "assistant" : "";
+        if (!role) return null;
+
+        const content = pickContent(m);
+        if (!content) return null;
+
+        // 長すぎるメッセージは切り詰め（落とすより事故が少ない）
+        const clipped = content.length > MAX_CONTENT_LEN ? content.slice(0, MAX_CONTENT_LEN) : content;
+
         return {
-          role: m.role === "user" ? "user" : "assistant",
-          content,
-          text: content, // 互換
-          ts,
+          role,
+          content: clipped,
+          text: clipped, // 互換
+          ts: normalizeTs(m?.ts),
         };
       })
-      .filter((m) => m.content.trim().length > 0);
+      .filter(Boolean) as { role: "user" | "assistant"; content: string; text: string; ts: string }[];
 
     if (mapped.length === 0) {
       return NextResponse.json({ ok: false, error: "有効な messages がありません" }, { status: 400 });
