@@ -121,7 +121,8 @@ function isNicknamePrompt(text: string): boolean {
 }
 
 
-export default function Page() {
+export default function ChatPageClient() {
+
   const router = useRouter();
   const searchParams = useSearchParams();
   const [mounted, setMounted] = useState(false);
@@ -461,9 +462,30 @@ export default function Page() {
     setInput("");
 
     try {
+      const token = await getAccessToken();
+      if (!token) {
+        // /api/chat はログイン必須（Bearer token）になったので、未ログインなら案内して戻す
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: newId(),
+            ts: new Date().toISOString(),
+            role: "assistant",
+            content:
+              "会話を続けるにはログインが必要だよ。保護者ページでログインしてから、もう一度ためしてね。",
+          },
+        ]);
+        isSending.current = false;
+        router.push("/guardian/login");
+        return;
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
           childId,
           week,

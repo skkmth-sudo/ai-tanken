@@ -6,6 +6,7 @@ type MsgIn = {
   role: "user" | "assistant";
   content?: string;
   text?: string;
+  ts?: string; // クライアント側の発言時刻
 };
 
 type Body = {
@@ -143,14 +144,20 @@ export async function POST(req: Request) {
       );
     }
 
-    // guardian 側が期待している形：[{ role, text }]
+    // ✅ 保存形式を { role, content, ts } に統一（互換のため text も残す）
     const mapped = messages
       .slice(-120)
-      .map((m) => ({
-        role: m.role === "user" ? "user" : "assistant",
-        text: String((m.text ?? m.content ?? "") as string),
-      }))
-      .filter((m) => m.text.trim().length > 0);
+      .map((m) => {
+        const content = String(m.content ?? m.text ?? "");
+        const ts = String(m.ts ?? new Date().toISOString());
+        return {
+          role: m.role === "user" ? "user" : "assistant",
+          content,
+          text: content, // 互換
+          ts,
+        };
+      })
+      .filter((m) => m.content.trim().length > 0);
 
     if (mapped.length === 0) {
       return NextResponse.json({ ok: false, error: "有効な messages がありません" }, { status: 400 });
