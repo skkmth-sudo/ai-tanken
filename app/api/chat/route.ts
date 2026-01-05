@@ -1,4 +1,5 @@
-﻿import OpenAI from "openai";
+﻿// FILE: app/api/chat/route.ts
+import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getWeekConfig, WeekId } from "@/lib/persona";
@@ -13,7 +14,7 @@ type SimpleMsg = {
 };
 
 type Body = {
-  childId: string;              // ✅ 追加（親の子かチェックするため必須）
+  childId: string;
   messages: SimpleMsg[];
   week: WeekId;
   profile?: {
@@ -23,6 +24,72 @@ type Body = {
   };
 };
 
+// ------------------------------
+// Validation / normalization
+// ------------------------------
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WEEK_RE = /^week([1-9]|10)$/i;
+
+const MAX_MESSAGES_IN_REQUEST = 200; // まずは過剰サイズを弾く（チャットはこれで十分）
+const MAX_CONTENT_LEN = 2000;
+const MAX_INTERESTS = 8;
+const MAX_INTEREST_LEN = 40;
+
+function isUuid(v: unknown): v is string {
+  return typeof v === "string" && UUID_RE.test(v.trim());
+}
+
+function normalizeWeek(v: unknown): WeekId | null {
+  const t = typeof v === "string" ? v.trim() : "";
+  if (!t) return null;
+  if (!WEEK_RE.test(t)) return null;
+  return t.toLowerCase() as WeekId;
+}
+
+function clip(s: string, max = MAX_CONTENT_LEN) {
+  const t = (s ?? "").toString().trim();
+  return t.length > max ? t.slice(0, max) : t;
+}
+
+function normalizeMessages(v: unknown): SimpleMsg[] | null {
+  if (!Array.isArray(v)) return null;
+  if (v.length === 0) return [];
+  if (v.length > MAX_MESSAGES_IN_REQUEST) return null;
+
+  const out: SimpleMsg[] = [];
+  for (const raw of v) {
+    const role = (raw as any)?.role;
+    const content = (raw as any)?.content;
+    if (role !== "user" && role !== "assistant") continue;
+    if (typeof content !== "string") continue;
+    const c = clip(content);
+    if (!c) continue;
+    out.push({ role, content: c });
+  }
+  return out;
+}
+
+function normalizeProfile(v: unknown): Body["profile"] {
+  const p = v && typeof v === "object" ? (v as any) : {};
+  const grade = typeof p.grade === "string" ? clip(p.grade, 30) : undefined;
+  const nickname =
+    typeof p.nickname === "string" ? clip(p.nickname, 20) : undefined;
+
+  const interestsRaw = Array.isArray(p.interests) ? p.interests : [];
+  const interests = interestsRaw
+    .filter((x: any) => typeof x === "string")
+    .map((x: string) => clip(x, MAX_INTEREST_LEN))
+    .filter(Boolean)
+    .slice(0, MAX_INTERESTS);
+
+  const cleaned: Body["profile"] = {};
+  if (grade) cleaned.grade = grade;
+  if (nickname) cleaned.nickname = nickname;
+  if (interests.length) cleaned.interests = interests;
+  return cleaned;
+}
+
 function getBearerToken(req: Request) {
   const h = req.headers.get("authorization") || req.headers.get("Authorization");
   if (!h) return "";
@@ -30,16 +97,40 @@ function getBearerToken(req: Request) {
   return m?.[1]?.trim() ?? "";
 }
 
+function jsonErr(status: number, reply: string) {
+  return NextResponse.json({ ok: false, reply }, { status });
+}
+
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as Body;
-    const { messages, week, profile } = body;
-    const childId = (body.childId ?? "").trim();
+    const bodyUnknown = (await req.json()) as unknown;
 
-    if (!childId) {
-      return NextResponse.json(
-        { ok: false, reply: "子ども情報が見つからないよ（childId がありません）。保護者マイページから入り直してね。" },
-        { status: 400 }
+    const childId =
+      typeof (bodyUnknown as any)?.childId === "string"
+        ? (bodyUnknown as any).childId.trim()
+        : "";
+
+    const week = normalizeWeek((bodyUnknown as any)?.week);
+    const messages = normalizeMessages((bodyUnknown as any)?.messages);
+    const profile = normalizeProfile((bodyUnknown as any)?.profile);
+
+    // ---- Request validation ----
+    if (!isUuid(childId)) {
+      return jsonErr(
+        400,
+        "子ども情報が見つからないよ（childId が不正です）。保護者マイページから入り直してね。"
+      );
+    }
+    if (!week) {
+      return jsonErr(
+        400,
+        "週の情報が不正みたい（week が不正です）。保護者マイページから入り直してね。"
+      );
+    }
+    if (messages === null) {
+      return jsonErr(
+        400,
+        "メッセージが多すぎるか形式が不正です。もう一度ためしてみてね。"
       );
     }
 
@@ -47,17 +138,17 @@ export async function POST(req: Request) {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     if (!url || !anonKey) {
-      return NextResponse.json(
-        { ok: false, reply: "サーバーの設定が足りないみたい（SUPABASE設定）。大人の人に確認してもらってね。" },
-        { status: 500 }
+      return jsonErr(
+        500,
+        "サーバーの設定が足りないみたい（SUPABASE設定）。大人の人に確認してもらってね。"
       );
     }
 
     const token = (getBearerToken(req) || "").trim();
     if (!token) {
-      return NextResponse.json(
-        { ok: false, reply: "ログインが必要だよ（認証トークンがありません）。/guardian/login からログインしてね。" },
-        { status: 401 }
+      return jsonErr(
+        401,
+        "ログインが必要だよ（認証トークンがありません）。/guardian/login からログインしてね。"
       );
     }
 
@@ -79,6 +170,7 @@ export async function POST(req: Request) {
       let userData: any = null;
       let userErr: any = null;
 
+      // まず getUser(token)
       try {
         const r = await authAny.getUser(token);
         userData = r?.data;
@@ -87,6 +179,7 @@ export async function POST(req: Request) {
         userErr = e;
       }
 
+      // ダメなら getUser()（global Authorization を使う）
       if (userErr || !userData?.user?.id) {
         try {
           const r2 = await authAny.getUser();
@@ -100,10 +193,7 @@ export async function POST(req: Request) {
       uid = userData?.user?.id ?? "";
       if (userErr || !uid) {
         const msg = userErr?.message ?? String(userErr ?? "invalid token");
-        return NextResponse.json(
-          { ok: false, reply: `ログイン情報の確認に失敗したよ: ${msg}` },
-          { status: 401 }
-        );
+        return jsonErr(401, `ログイン情報の確認に失敗したよ: ${msg}`);
       }
     }
 
@@ -115,13 +205,17 @@ export async function POST(req: Request) {
       .maybeSingle();
 
     if (parentErr) {
-      return NextResponse.json({ ok: false, reply: parentErr.message }, { status: 500 });
+      console.error("[api/chat] parent select error:", parentErr.message);
+      return jsonErr(
+        500,
+        "サーバー側で問題が起きたみたい。もう一度ためしてみてね。"
+      );
     }
     const parentId = (parentRow as any)?.id ?? null;
     if (!parentId) {
-      return NextResponse.json(
-        { ok: false, reply: "保護者情報が見つからないよ。/guardian/login から入り直してね。" },
-        { status: 403 }
+      return jsonErr(
+        403,
+        "保護者情報が見つからないよ。/guardian/login から入り直してね。"
       );
     }
 
@@ -134,12 +228,16 @@ export async function POST(req: Request) {
       .maybeSingle();
 
     if (childErr) {
-      return NextResponse.json({ ok: false, reply: childErr.message }, { status: 500 });
+      console.error("[api/chat] child check error:", childErr.message);
+      return jsonErr(
+        500,
+        "サーバー側で問題が起きたみたい。もう一度ためしてみてね。"
+      );
     }
     if (!(childRow as any)?.id) {
-      return NextResponse.json(
-        { ok: false, reply: "この子ども情報では会話できないよ（権限がありません）。" },
-        { status: 403 }
+      return jsonErr(
+        403,
+        "この子ども情報では会話できないよ（権限がありません）。"
       );
     }
 
@@ -186,25 +284,37 @@ ${profileLines.join("\n")}`
         : "") +
       nicknameRule;
 
+    // OpenAIに送る履歴は最新側だけに圧縮（重さ対策 + 予期せぬ長文を避ける）
+    const trimmedHistory = (messages ?? []).slice(-60);
+
     const openaiMessages = [
       { role: "system" as const, content: systemText },
       { role: "assistant" as const, content: cfg.openingMessage },
-      ...(messages ?? []).map((m) => ({
+      ...trimmedHistory.map((m) => ({
         role: m.role === "user" ? ("user" as const) : ("assistant" as const),
-        content: m.content,
+        content: clip(m.content),
       })),
     ];
 
-    const resp = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: openaiMessages,
-      temperature: 0.7,
-      max_tokens: 400,
-    });
+    let reply = "";
+    try {
+      const resp = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: openaiMessages,
+        temperature: 0.7,
+        max_tokens: 400,
+      });
 
-    let reply =
-      resp.choices[0]?.message?.content?.trim() ??
-      "エラーが起きたみたい。もう一度ためしてみてね。";
+      reply =
+        resp.choices[0]?.message?.content?.trim() ??
+        "エラーが起きたみたい。もう一度ためしてみてね。";
+    } catch (e: any) {
+      console.error("[api/chat] openai error:", e?.message ?? e);
+      return jsonErr(
+        500,
+        "今はお返事が作れないみたい。少し時間をおいて、もう一度ためしてみてね。"
+      );
+    }
 
     // ✅ “定期的に名前で呼ぶ”を確実にする保険
     if (nickname) {
@@ -219,8 +329,8 @@ ${profileLines.join("\n")}`
     }
 
     return NextResponse.json({ ok: true, reply });
-  } catch (err) {
-    console.error(err);
+  } catch (err: any) {
+    console.error("[api/chat] unexpected:", err?.message ?? err);
     return NextResponse.json(
       { ok: false, reply: "エラーが起きたみたい。もう一度ためしてみてね。" },
       { status: 500 }

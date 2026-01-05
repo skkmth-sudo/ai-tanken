@@ -153,6 +153,9 @@ export default function GuardianPage() {
   const [parentNameFromDb, setParentNameFromDb] = useState<string | null>(null);
   // Supabase から読んだ子ども一覧（なければ [] → fallback を使う）
   const [childrenFromDb, setChildrenFromDb] = useState<Child[]>([]);
+  // 初期ロード状態／ユーザー向けエラー表示
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   // 選択中の子どものID
   const [selectedChildId, setSelectedChildId] = useState(
     fallbackParent.children[0]?.id ?? ""
@@ -169,19 +172,29 @@ export default function GuardianPage() {
 
   // 🔍 ログインチェック＋ parent / children / chat_sessions 読み込み
   useEffect(() => {
+    let alive = true;
+
     const fetchParentAndChildren = async () => {
-      // ① セッション取得（RequireAuth で守られているが、二重チェックとして最小限）
+      setIsLoading(true);
+      setLoadError(null);
+
+      // ① セッション取得（RequireAuth で守られているが、親ID取得に userId が必要）
       const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
       const session = sessionData?.session ?? null;
 
+      if (!alive) return;
+
       if (sessionError) {
         console.error("getSession error:", sessionError.message);
+        setLoadError("読み込みに失敗しました。時間をおいて再度お試しください。");
+        setIsLoading(false);
         return;
       }
 
       if (!session) {
-        // 未ログインならログイン画面へ
+        // 未ログインならログイン画面へ（RequireAuth 側でもガードされる）
         router.replace("/guardian/login");
+        setIsLoading(false);
         return;
       }
 
@@ -193,8 +206,6 @@ export default function GuardianPage() {
         .select("id, name")
         .eq("user_id", userId)
         .limit(1);
-
-      console.log("parentRows:", parentRows);
 
       if (parentError) {
         console.error("parent error:", parentError.message);
@@ -220,8 +231,6 @@ export default function GuardianPage() {
         .from("children")
         .select("id, name, nickname, grade, avatar_label, favorites, strength, growth_points")
         .eq("parent_id", parentId);
-
-      console.log("childrenRows:", childrenRows);
 
       if (childrenError) {
         console.error("children error:", childrenError.message);
@@ -306,7 +315,20 @@ export default function GuardianPage() {
       }
     };
 
-    fetchParentAndChildren();
+    fetchParentAndChildren()
+      .catch((e) => {
+        console.error("guardian load error:", e);
+        if (!alive) return;
+        setLoadError("読み込みに失敗しました。時間をおいて再度お試しください。");
+      })
+      .finally(() => {
+        if (!alive) return;
+        setIsLoading(false);
+      });
+
+    return () => {
+      alive = false;
+    };
   }, [router]);
 
   // ✅ 「Supabaseがあれば上書き・なければそのまま」
@@ -332,8 +354,7 @@ export default function GuardianPage() {
   };
 
   const handleOpenLog = () => {
-    console.log("open log clicked, recentSessions:", child.recentSessions);
-    const latest = child.recentSessions[0] ?? null;
+        const latest = child.recentSessions[0] ?? null;
     setActiveSession(latest);
     setIsLogOpen(true);
   };
@@ -415,6 +436,29 @@ export default function GuardianPage() {
 
       {/* 🔥 カフェ背景＋中央あいさつ */}
       <section className="hero" style={{ position: "relative", opacity: 1 }}>
+        {loadError && (
+          <div
+            role="alert"
+            style={{
+              position: "absolute",
+              top: 12,
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 20,
+              width: "min(920px, 92vw)",
+              padding: "10px 14px",
+              borderRadius: 12,
+              background: "rgba(255,255,255,0.85)",
+              border: "1px solid rgba(180, 60, 60, 0.25)",
+              color: "#7a2f2f",
+              fontSize: 13,
+              fontWeight: 700,
+              boxShadow: "0 10px 24px rgba(0,0,0,0.12)",
+            }}
+          >
+            {loadError}
+          </div>
+        )}
         {/* ★ ヒーロー中央カラム（あいさつ → CTA を縦並び） */}
         <div
           style={{
@@ -474,6 +518,11 @@ export default function GuardianPage() {
 
       {/* ダッシュボード本体（スクロール後のゾーン） */}
       <main className="content">
+        {isLoading && !loadError && (
+          <p style={{ margin: 0, padding: "10px 0", fontSize: 13, opacity: 0.85 }}>
+            読み込み中…
+          </p>
+        )}
         <section>
           {/* あいさつ文は hero に移したので、ここは子ども切り替えだけ */}
           {hasMultipleChildren && (
