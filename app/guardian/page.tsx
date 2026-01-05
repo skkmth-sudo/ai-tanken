@@ -1,9 +1,11 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Link from "next/link";
 import "./guardian.css";
 import { supabase } from "@/lib/supabaseClient";
 import { useRouter } from "next/navigation";
+import { RequireAuth } from "./RequireAuth";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -141,6 +143,9 @@ const fallbackParent: ParentData = {
   ],
 };
 
+// UIで描画するメッセージ数（長文セッションでも重くならないように）
+const MAX_MESSAGES_TO_RENDER = 60;
+
 export default function GuardianPage() {
   const router = useRouter();
 
@@ -165,30 +170,28 @@ export default function GuardianPage() {
   // 🔍 ログインチェック＋ parent / children / chat_sessions 読み込み
   useEffect(() => {
     const fetchParentAndChildren = async () => {
-      // ① ログイン中ユーザー取得
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
+      // ① セッション取得（RequireAuth で守られているが、二重チェックとして最小限）
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      const session = sessionData?.session ?? null;
 
-      console.log("Logged in user:", user);
-
-      if (userError) {
-        console.error("getUser error:", userError.message);
+      if (sessionError) {
+        console.error("getSession error:", sessionError.message);
         return;
       }
 
-      if (!user) {
+      if (!session) {
         // 未ログインならログイン画面へ
-        router.push("/guardian/login");
+        router.replace("/guardian/login");
         return;
       }
+
+      const userId = session.user.id;
 
       // ② parent 取得（user_id 紐づけ）
       const { data: parentRows, error: parentError } = await supabase
         .from("parent")
         .select("id, name")
-        .eq("user_id", user.id)
+        .eq("user_id", userId)
         .limit(1);
 
       console.log("parentRows:", parentRows);
@@ -215,7 +218,7 @@ export default function GuardianPage() {
       // ③ children 取得
       const { data: childrenRows, error: childrenError } = await supabase
         .from("children")
-        .select("*")
+        .select("id, name, nickname, grade, avatar_label, favorites, strength, growth_points")
         .eq("parent_id", parentId);
 
       console.log("childrenRows:", childrenRows);
@@ -230,39 +233,42 @@ export default function GuardianPage() {
       }
       const children = childrenRows as any[];
 
-      // ④ 各 child.id ごとに chat_sessions を取得
+      // ④ chat_sessions をまとめて取得（N+1防止）
+      const childIds = children.map((c) => c.id).filter(Boolean);
+
       const sessionsMap: Record<string, ChatSession[]> = {};
+      for (const id of childIds) sessionsMap[id] = [];
 
-      for (const c of children) {
-        const { data: sessions, error: sessionsError } = await supabase
+      if (childIds.length > 0) {
+        const { data: sessionRows, error: sessionsError } = await supabase
           .from("chat_sessions")
-          .select("*")
-          .eq("child_id", c.id)
+          .select("id, child_id, created_at, messages")
+          .in("child_id", childIds)
           .order("created_at", { ascending: false })
-          .limit(3);
-
-        console.log("chat_sessions for child", c.id, sessions);
+          // 3件/子ども を確実に拾えるよう、少し多めに取得（上限を設けて暴走を防ぐ）
+          .limit(Math.min(60, childIds.length * 12));
 
         if (sessionsError) {
-          console.error(
-            "chat_sessions error for child",
-            c.id,
-            sessionsError.message
-          );
-          continue;
-        }
+          console.error("chat_sessions bulk error:", sessionsError.message);
+        } else {
+          for (const s of sessionRows ?? []) {
+            const cid = (s as any).child_id as string | undefined;
+            if (!cid || !sessionsMap[cid]) continue;
+            if (sessionsMap[cid].length >= 3) continue;
 
-        sessionsMap[c.id] = (sessions ?? []).map((s: any) => ({
-          id: s.id as string,
-          startedAt: (s.created_at as string) ?? "",
-          messages: Array.isArray(s.messages)
-            ? (s.messages as any[]).map((m: any) => ({
-                role: m?.role === "user" ? "user" : "assistant",
-                // 互換: save-session は content で保存するので、text が無い場合は content を拾う
-                text: String(m?.text ?? m?.content ?? m?.message ?? ""),
-              }))
-            : [],
-        }));
+            sessionsMap[cid].push({
+              id: (s as any).id as string,
+              startedAt: ((s as any).created_at as string) ?? "",
+              messages: Array.isArray((s as any).messages)
+                ? ((s as any).messages as any[]).map((m: any) => ({
+                    role: m?.role === "user" ? "user" : "assistant",
+                    // 互換: save-session は content で保存するので、text が無い場合は content を拾う
+                    text: String(m?.text ?? m?.content ?? m?.message ?? ""),
+                  }))
+                : [],
+            });
+          }
+        }
       }
 
       // 🔽 ここを修正（growth_points ＋ recentSessions も含める）
@@ -392,7 +398,8 @@ export default function GuardianPage() {
   };
 
   return (
-    <div className="page">
+    <RequireAuth>
+      <div className="page">
       {/* 上部ヘッダー */}
       <header className="header">
         <div className="header-inner">
@@ -631,6 +638,23 @@ export default function GuardianPage() {
         </section>
       </main>
 
+      <footer
+        style={{
+          textAlign: "center",
+          fontSize: 12,
+          opacity: 0.85,
+          padding: "22px 12px",
+        }}
+      >
+        <Link href="/terms" style={{ textDecoration: "underline", color: "inherit" }}>
+          利用規約
+        </Link>
+        <span style={{ margin: "0 10px" }}>|</span>
+        <Link href="/privacy" style={{ textDecoration: "underline", color: "inherit" }}>
+          プライバシーポリシー
+        </Link>
+      </footer>
+
       {/* 🗨 会話ログモーダル */}
       {isLogOpen && (
         <div className="chat-modal-backdrop" onClick={handleCloseLog}>
@@ -652,7 +676,7 @@ export default function GuardianPage() {
             </div>
             <div className="chat-modal-body">
               {activeSession ? (
-                activeSession.messages.map((m, idx) => (
+                activeSession.messages.slice(-MAX_MESSAGES_TO_RENDER).map((m, idx) => (
                   <div
                     key={idx}
                     className={
@@ -748,6 +772,7 @@ export default function GuardianPage() {
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </RequireAuth>
   );
 }
