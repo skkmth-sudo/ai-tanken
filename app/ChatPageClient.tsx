@@ -19,6 +19,302 @@ type Msg = {
   content: string;
 };
 
+// ==============================
+// WeekFlow（Weekごとの stage/slots）
+// - Week52まで拡張できるように「週ごとの定義を差し替える」ための土台
+// - 先生の返答生成は /api/chat 側で継続（ニックネーム呼び・変更検知を維持）
+// ==============================
+
+type Week1Stage = "ASK_LIKES" | "ASK_FAVORITE" | "ASK_REASON" | "GENERATE";
+
+type Week1Slots = {
+  likes: string[]; // 最大3
+  favorite: string | null;
+  favorite_reason: string | null;
+};
+
+type WeekFlowState =
+  | {
+      week: "week1";
+      stage: Week1Stage;
+      slots: Week1Slots;
+    }
+  | {
+      // 未対応週は null 運用（フォールバックで従来の会話を壊さない）
+      week: WeekId;
+      stage: string;
+      slots: any;
+    };
+
+function initWeekFlow(w: WeekId): WeekFlowState | null {
+  if (w === "week1") {
+    return {
+      week: "week1",
+      stage: "ASK_LIKES",
+      slots: {
+        likes: [],
+        favorite: null,
+        favorite_reason: null,
+      },
+    };
+  }
+  return null;
+}
+
+// ==============================
+// Week1: ルール抽出（自然文 → slots）
+// - 最小改造で「抽出・充足判定・生成前提」を技術として言える状態にする
+// - 文章生成/ニックネーム運用は /api/chat に残す
+// ==============================
+
+function uniqPush(list: string[], v: string) {
+  const t = (v || "").trim();
+  if (!t) return list;
+  if (list.includes(t)) return list;
+  list.push(t);
+  return list;
+}
+
+function cleanLikeToken(s: string) {
+  let t = (s || "").trim();
+  if (!t) return "";
+  // よくある前置きを除去
+  t = t.replace(/^(ぼく|僕|わたし|私|おれ|俺)は\s*/u, "");
+  t = t.replace(/^(すきなのは|好きなのは)\s*/u, "");
+  // 末尾の言い回しを除去
+  t = t.replace(/(がすき|が好き|すき|好き)(です|だよ|だ)?$/u, "");
+  t = t.replace(/[。!！?？]+$/u, "");
+  t = t.trim();
+  // 長すぎるのは切る
+  if (t.length > 30) t = t.slice(0, 30);
+  return t;
+}
+
+function extractLikesFromText(text: string): string[] {
+  const raw = (text || "").trim();
+  if (!raw) return [];
+
+  // 区切り候補で一旦分割
+  const normalized = raw
+    .replace(/[、，,]/g, "|")
+    .replace(/[・]/g, "|")
+    .replace(/[／/]/g, "|")
+    .replace(/[＆&]/g, "|")
+    // 「AとB」「AやB」も分解
+    .replace(/\s*(と|や)\s*/g, "|")
+    .replace(/[。]/g, "|");
+
+  const parts = normalized
+    .split("|")
+    .map(cleanLikeToken)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  // 「好きなものはサッカーです」みたいに一塊の場合の救済
+  if (parts.length === 0) {
+    const m = raw.match(/(?:すき|好き)なもの(?:は|って)\s*([ぁ-んァ-ヶ一-龠A-Za-z0-9]{1,20})/u);
+    if (m?.[1]) return [cleanLikeToken(m[1])].filter(Boolean);
+  }
+
+  // 重複除去しつつ最大3
+  const out: string[] = [];
+  for (const p of parts) {
+    if (out.length >= 3) break;
+    uniqPush(out, p);
+  }
+  return out;
+}
+
+function pickFavoriteFromText(text: string, likes: string[]): string | null {
+  const t = (text || "").trim();
+  if (!t) return null;
+  // likes のどれかが文中に含まれていればそれ
+  for (const like of likes) {
+    if (like && t.includes(like)) return like;
+  }
+  // 「1番/2番/3番」指定
+  if (/1\s*番|１\s*番/u.test(t) && likes[0]) return likes[0];
+  if (/2\s*番|２\s*番/u.test(t) && likes[1]) return likes[1];
+  if (/3\s*番|３\s*番/u.test(t) && likes[2]) return likes[2];
+  return null;
+}
+
+function extractReasonFromText(text: string): string | null {
+  const raw = (text || "").trim();
+  if (!raw) return null;
+
+  // ✅ NG（理由として受け取らない）: 逃げ/不明/否定
+  const ng = /(わからない|わかんない|しらない|知らない|むり|無理|できない|ない|とくにない|別に|べつに|まだ|うーん|えっと|…|・・・)/u;
+  if (ng.test(raw)) return null;
+
+  // ✅ 短すぎる理由は弾く（例：3文字以下は「理由」になりにくい）
+  if (raw.replace(/\s+/g, "").length < 4) return null;
+
+  // 理由は〜 / 〜から / 〜ので / 〜だから
+  const m1 = raw.match(/(?:理由|りゆう)は\s*(.+)$/u);
+  if (m1?.[1]) {
+    const r = m1[1].trim();
+    if (!r) return null;
+    if (ng.test(r)) return null;
+    if (r.replace(/\s+/g, "").length < 4) return null;
+    return r.length > 80 ? r.slice(0, 80) : r;
+  }
+
+  // 「〜から/ので/だから」系（末尾に来るケース）
+  const m2 = raw.match(/(.+?)(?:だから|なので|から)\s*$/u);
+  if (m2?.[1]) {
+    const r = m2[1].trim();
+    if (!r) return null;
+    if (ng.test(r)) return null;
+    if (r.replace(/\s+/g, "").length < 4) return null;
+    return r.length > 80 ? r.slice(0, 80) : r;
+  }
+
+  // 短文の場合は全文を理由として扱う（ただし上の条件を満たすこと）
+  const r = raw.replace(/[。!！?？]+$/u, "").trim();
+  if (!r) return null;
+  if (ng.test(r)) return null;
+  if (r.replace(/\s+/g, "").length < 4) return null;
+  return r.length > 80 ? r.slice(0, 80) : r;
+}
+
+function applyWeek1FlowOnUserInput(current: WeekFlowState | null, userText: string): WeekFlowState | null {
+  if (!current || current.week !== "week1") return current;
+
+  const stage = current.stage;
+  const slots = { ...current.slots };
+
+  if (stage === "ASK_LIKES") {
+    const extracted = extractLikesFromText(userText);
+    // 既存likesとマージ（段階的に集める）
+    const merged: string[] = [...(slots.likes || [])];
+    for (const x of extracted) {
+      if (merged.length >= 3) break;
+      uniqPush(merged, x);
+    }
+    slots.likes = merged.slice(0, 3);
+
+    // 3つ揃ったら次へ
+    const nextStage: Week1Stage = slots.likes.length >= 3 ? "ASK_FAVORITE" : "ASK_LIKES";
+    return { week: "week1", stage: nextStage, slots };
+  }
+
+  if (stage === "ASK_FAVORITE") {
+    const fav = pickFavoriteFromText(userText, slots.likes || []);
+    if (fav) {
+      slots.favorite = fav;
+      return { week: "week1", stage: "ASK_REASON", slots };
+    }
+    return { week: "week1", stage: "ASK_FAVORITE", slots };
+  }
+
+  if (stage === "ASK_REASON") {
+    const r = extractReasonFromText(userText);
+    if (r) {
+      slots.favorite_reason = r;
+      return { week: "week1", stage: "GENERATE", slots };
+    }
+    return { week: "week1", stage: "ASK_REASON", slots };
+  }
+
+  // GENERATE の後は維持
+  return current;
+}
+
+function localOpeningForWeek(w: WeekId, flow: WeekFlowState | null): string {
+  if (w === "week1" && flow && flow.week === "week1") {
+    if (flow.stage === "ASK_LIKES") return "好きなものを3つ教えて！たとえば『好きな教科』『好きな遊び』『好きな色』みたいに、なんでもOKだよ。『〇〇と〇〇と〇〇が好き』って言ってみてね。";
+    if (flow.stage === "ASK_FAVORITE") return "教えてくれた中で、一番好きなのはどれ？";
+    if (flow.stage === "ASK_REASON") return "一番好きなもののどこが好き？理由は1つだけでOKだよ。";
+    if (flow.stage === "GENERATE") return "ありがとう。じゃあ、自己紹介文を3文くらいで作るね。";
+  }
+  return weeks[w].openingMessage;
+}
+
+// ==============================
+// WeekFlow 永続化（childId × week）
+// - ページ更新や離脱/再入場でも「途中の段階」を保持
+// ==============================
+
+const LS_WEEKFLOW = "ai-tanken:weekflow";
+
+function weekFlowKey(childId: string, week: WeekId) {
+  return `${LS_WEEKFLOW}:${(childId || "_no_child").trim()}:${week}`;
+}
+
+function isSameWeekFlow(a: WeekFlowState | null, b: WeekFlowState | null) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (a.week !== b.week) return false;
+
+  if (a.week === "week1" && b.week === "week1") {
+    if (a.stage !== b.stage) return false;
+    const la = Array.isArray(a.slots?.likes) ? a.slots.likes : [];
+    const lb = Array.isArray(b.slots?.likes) ? b.slots.likes : [];
+    if (la.length !== lb.length) return false;
+    for (let i = 0; i < la.length; i++) {
+      if (la[i] !== lb[i]) return false;
+    }
+    if ((a.slots.favorite ?? null) !== (b.slots.favorite ?? null)) return false;
+    if ((a.slots.favorite_reason ?? null) !== (b.slots.favorite_reason ?? null)) return false;
+    return true;
+  }
+
+  // それ以外（将来拡張）の場合は軽く比較
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeLocalWeekFlow(v: any, week: WeekId): WeekFlowState | null {
+  // まずは Week1 だけ永続化対象（未対応週は null でフォールバック）
+  if (week !== "week1") return null;
+
+  const init = initWeekFlow(week);
+  if (!init) return null;
+
+  if (!v || typeof v !== "object") return init;
+
+  const stageRaw = typeof v.stage === "string" ? v.stage.trim() : "";
+  const stage: Week1Stage =
+    stageRaw === "ASK_LIKES" ||
+    stageRaw === "ASK_FAVORITE" ||
+    stageRaw === "ASK_REASON" ||
+    stageRaw === "GENERATE"
+      ? stageRaw
+      : "ASK_LIKES";
+
+  const slotsRaw = v.slots && typeof v.slots === "object" ? v.slots : {};
+
+  const likesRaw = Array.isArray(slotsRaw.likes) ? slotsRaw.likes : [];
+  const likes = likesRaw
+    .filter((x: any) => typeof x === "string")
+    .map((x: string) => x.trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((x: string) => (x.length > 30 ? x.slice(0, 30) : x));
+
+  let favorite = typeof slotsRaw.favorite === "string" ? slotsRaw.favorite.trim() : "";
+  favorite = favorite.length > 30 ? favorite.slice(0, 30) : favorite;
+  const fav = favorite && likes.includes(favorite) ? favorite : null;
+
+  let reason = typeof slotsRaw.favorite_reason === "string" ? slotsRaw.favorite_reason.trim() : "";
+  reason = reason.length > 80 ? reason.slice(0, 80) : reason;
+  const favorite_reason = reason ? reason : null;
+
+  return {
+    week: "week1",
+    stage,
+    slots: {
+      likes,
+      favorite: fav,
+      favorite_reason,
+    },
+  };
+}
+
 const LS_HISTORY = "ai-tanken:history";
 
 function historyKey(childId: string) {
@@ -140,6 +436,11 @@ export default function ChatPageClient() {
   const [mounted, setMounted] = useState(false);
 
   const [week, setWeek] = useState<WeekId>("week1");
+  // ★ Weekごとの進行(stage)とスロット(slots)を保持（Week52まで拡張する土台）
+  // 未対応週は null（従来の挙動にフォールバック）
+  const [weekFlow, setWeekFlow] = useState<WeekFlowState | null>(() => initWeekFlow("week1"));
+  // ★ weekFlow の復元が完了するまで保存で上書きしないためのフラグ
+  const [weekFlowHydrated, setWeekFlowHydrated] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [grade, setGrade] = useState<Grade>("小3");
   const [nickname, setNickname] = useState("");
@@ -179,6 +480,7 @@ export default function ChatPageClient() {
       const savedWeek = (localStorage.getItem(LS_WEEK) as WeekId) ?? "week1";
       const initialWeek = savedWeek in weeks ? savedWeek : "week1";
       setWeek(initialWeek);
+      setWeekFlow(initWeekFlow(initialWeek));
 
       // childId: URL ?childId=... が最優先（※searchParams は別Effectで反映）
             const fromLs = normalizeChildId(localStorage.getItem(LS_CHILD_ID) ?? "");
@@ -316,7 +618,7 @@ export default function ChatPageClient() {
     }
 
     // 履歴が無い/壊れている場合は、その週の導入メッセージから開始
-    const opening = weeks[week].openingMessage;
+    const opening = localOpeningForWeek(week, initWeekFlow(week));
     const init: Msg[] = [
       {
         id: newId(),
@@ -328,6 +630,53 @@ export default function ChatPageClient() {
     setMessages(init);
     localStorage.setItem(key, JSON.stringify(init));
   }, [childId, mounted]);
+
+  // ★ WeekFlow（stage/slots）を childId×week で復元（ページ更新でも続きから）
+  useEffect(() => {
+    if (!mounted) return;
+
+    setWeekFlowHydrated(false);
+
+    const key = weekFlowKey(childId, week);
+    const raw = localStorage.getItem(key);
+
+    let target: WeekFlowState | null = initWeekFlow(week);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        target = normalizeLocalWeekFlow(parsed, week);
+      } catch {
+        // ignore
+      }
+    }
+
+    setWeekFlow((cur) => (isSameWeekFlow(cur, target) ? cur : target));
+    setWeekFlowHydrated(true);
+  }, [childId, week, mounted]);
+
+  // ★ WeekFlow を保存（復元前に上書きしないため hydrated 後に保存）
+  useEffect(() => {
+    if (!mounted) return;
+    if (!weekFlowHydrated) return;
+
+    const key = weekFlowKey(childId, week);
+
+    // 未対応週は null のまま（キーは掃除）
+    if (!weekFlow) {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    try {
+      localStorage.setItem(key, JSON.stringify(weekFlow));
+    } catch {
+      // ignore
+    }
+  }, [weekFlow, weekFlowHydrated, childId, week, mounted]);
 
   // ★ ローカル履歴が「初期状態」なら、Supabaseの最新セッションから復元（白紙っぽさ対策）
   useEffect(() => {
@@ -523,6 +872,11 @@ export default function ChatPageClient() {
       content: input.trim(),
     };
 
+    // ★ WeekFlow を「ユーザー入力」で更新（決定論：抽出・充足判定・stage遷移）
+    // 先生の返答は /api/chat が生成（ニックネーム呼び・変更検知を維持）
+    const nextWeekFlow = week === "week1" ? applyWeek1FlowOnUserInput(weekFlow, me.content) : weekFlow;
+    if (nextWeekFlow !== weekFlow) setWeekFlow(nextWeekFlow);
+
   
 
     // ★ ここで最新の messages から next を作る（stale state 対策）
@@ -558,6 +912,8 @@ export default function ChatPageClient() {
         body: JSON.stringify({
           childId,
           week,
+          // ★ WeekFlow（stage/slots）を同梱（/api/chat 側が未対応でも無視されるので安全）
+          weekFlow: nextWeekFlow ?? undefined,
           // /api/chat には "今の入力" を含めて送る
           messages: nextForUi.slice(-16).map(({ role, content }) => ({
             role,
@@ -599,7 +955,9 @@ export default function ChatPageClient() {
   // week 切り替え：導入メッセージを新しく足す（履歴は残す）
   function handleWeekChange(newWeek: WeekId) {
     setWeek(newWeek);
-    const opening = weeks[newWeek].openingMessage;
+    // ★ 週が変わったら WeekFlow も初期化（ステージの持ち越し防止）
+    setWeekFlow(initWeekFlow(newWeek));
+    const opening = localOpeningForWeek(newWeek, initWeekFlow(newWeek));
     setMessages((prev) => [
       ...prev,
       {
@@ -614,7 +972,9 @@ export default function ChatPageClient() {
   // 会話をすべて消して、現在の week の最初のメッセージだけに戻す
   function resetAll() {
     const w = week;
-    const opening = weeks[w].openingMessage;
+    // ★ リセット時は WeekFlow も初期化
+    setWeekFlow(initWeekFlow(w));
+    const opening = localOpeningForWeek(w, initWeekFlow(w));
     const init: Msg[] = [
       {
         id: newId(),
